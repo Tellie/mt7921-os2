@@ -6,7 +6,8 @@
  *   /hw  run the phase 2 hardware probe (fw/driver own + chip ID)
  *   /fw  run the phase 3a firmware boot (WFDMA + ROM patch download)
  *   /x:N experiment flags for /fw (hex, see FWX_ in wrnd_ioctl.h)
- *   /scan  phase 4a: first scan (run /fw first, same session)
+ *   /scan  diagnostic scan (loads the firmware if needed)
+ *   /list  like wpa_supplicant: OID BSSID_LIST_SCAN, then BSSID_LIST
  */
 #define INCL_DOS
 #define INCL_DOSDEVIOCTL
@@ -293,18 +294,18 @@ static void do_scan(void)
     printf("  BSS_INFO        UNI status %08lX (0 = OK)\n", s.BssUni);
     printf("  HW_SCAN         %s\n", s.StScan == 0 ? "sent" :
            s.StScan == 0xFFFE ? "not sent (TX timeout)" : "-");
-    printf("  RX frames       %lu on ring 2, %lu on the MCU rings, beacons/probe responses %lu\n",
-           s.Frames, s.Events, s.Beacons);
-    printf("  SCAN_DONE       %s after %lu polls\n", s.ScanDone ? "yes" : "NO", s.Polls);
+    printf("  RX frames       %lu, beacons/probe responses %lu, other events %lu\n",
+           s.Events, s.Beacons, s.Frames);
+    printf("  SCAN_DONE       %s after %lu x 16 ms\n", s.ScanDone ? "yes" : "NO", s.Polls);
     if (s.ScanDone)
         printf("                  seq %u, channels scanned %u, state %u, beacons %lu, country %.3s\n",
                s.DoneEvt[0], s.DoneEvt[4], s.DoneEvt[5],
                (ULONG)s.DoneEvt[8] | ((ULONG)s.DoneEvt[9] << 8) |
                ((ULONG)s.DoneEvt[10] << 16) | ((ULONG)s.DoneEvt[11] << 24),
                (char *)&s.DoneEvt[20]);
-    if (s.Events) {
+    if (s.Frames) {
         printf("  other event ids");
-        for (i = 0; i < 8 && i < (int)s.Events; i++)
+        for (i = 0; i < 8 && i < (int)s.Frames; i++)
             printf(" %02X", s.EvtIds[i]);
         printf("\n");
     }
@@ -314,17 +315,71 @@ static void do_scan(void)
             printf("%s%02X", i % 16 ? " " : "\n    ", s.FirstFrame[i]);
         printf("\n");
     }
-    printf("\n  %u network(s) found:\n", s.NBss);
-    for (i = 0; i < s.NBss; i++) {
+    printf("\n  %u network(s) found%s:\n", s.NBss, s.NBss > 16 ? " (first 16 shown)" : "");
+    for (i = 0; i < s.NBss && i < 16; i++) {
         MT7921_BSS *b = &s.Bss[i];
         char ssid[33];
         for (k = 0; k < b->SsidLen && k < 32; k++)
             ssid[k] = (b->Ssid[k] >= 32 && b->Ssid[k] < 127) ? b->Ssid[k] : '.';
         ssid[k] = 0;
-        printf("    %02X:%02X:%02X:%02X:%02X:%02X  ch %3u  %s\n",
+        printf("    %02X:%02X:%02X:%02X:%02X:%02X  ch %3u  %4d dBm  %s\n",
                b->Bssid[0], b->Bssid[1], b->Bssid[2], b->Bssid[3],
-               b->Bssid[4], b->Bssid[5], b->Channel,
+               b->Bssid[4], b->Bssid[5], b->Channel, s.Rssi[i],
                b->SsidLen ? ssid : "(hidden)");
+    }
+}
+
+/* exactly what wpa_supplicant-os2 does: SET BSSID_LIST_SCAN, then GET
+ * BSSID_LIST (10000 bytes, PacketRequest caps it) and walk the
+ * NDIS_WLAN_BSSID_EX entries like driver_genmac.c                    */
+static ULONG le32(const unsigned char *p)
+{
+    return (ULONG)p[0] | ((ULONG)p[1] << 8) | ((ULONG)p[2] << 16) | ((ULONG)p[3] << 24);
+}
+
+static void do_list(void)
+{
+    static unsigned char buf[10000];
+    ULONG st, done, n, i, pos;
+    int rc;
+
+    printf("\nBSSID_LIST_SCAN ...\n");
+    memcpy(buf, "    ", 4);
+    rc = oid_req(1, OID_802_11_BSSID_LIST_SCAN, buf, 4, &st, &done);
+    printf("  scan: rc=%d status=%08lX\n", rc, st);
+
+    memset(buf, 0, sizeof(buf));
+    rc = oid_req(0, OID_802_11_BSSID_LIST, buf, sizeof(buf), &st, &done);
+    printf("  BSSID_LIST: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st) return;
+
+    n = le32(buf);
+    printf("  %lu entries (as wpa_supplicant will see them):\n", n);
+    printf("    BSSID              MHz   dBm  priv  IEs  RSN WPA  SSID\n");
+    for (i = 0, pos = 4; i < n && pos + 116 <= done; i++) {
+        unsigned char *e = buf + pos;
+        ULONG elen = le32(e), ssidlen = le32(e + 12), ielen = le32(e + 112);
+        ULONG p;
+        int rsn = 0, wpa = 0;
+        char ssid[33];
+        unsigned k;
+
+        if (elen < 116 || pos + elen > done) { printf("    bad entry length %lu\n", elen); break; }
+        for (k = 0; k < ssidlen && k < 32; k++)
+            ssid[k] = (e[16 + k] >= 32 && e[16 + k] < 127) ? e[16 + k] : '.';
+        ssid[k] = 0;
+        for (p = 116 + 12; p + 2 <= 116 + ielen; p += 2 + e[p + 1]) {
+            if (e[p] == 48) rsn = 1;
+            if (e[p] == 221 && e[p + 1] >= 4 && e[p + 2] == 0x00 &&
+                e[p + 3] == 0x50 && e[p + 4] == 0xF2 && e[p + 5] == 1) wpa = 1;
+        }
+        printf("    %02X:%02X:%02X:%02X:%02X:%02X  %4lu  %4ld   %s   %4lu   %s   %s  %s\n",
+               e[4], e[5], e[6], e[7], e[8], e[9],
+               le32(e + 72) / 1000, (long)le32(e + 52),
+               le32(e + 48) ? "yes" : "no ", ielen,
+               rsn ? "+" : "-", wpa ? "+" : "-",
+               ssidlen ? ssid : "(hidden)");
+        pos += elen;
     }
 }
 
@@ -339,7 +394,7 @@ static void show_u32(const char *name, ULONG oid)
 int main(int argc, char **argv)
 {
     const char *dev = "WRND32$";
-    int do_hw = 0, do_fw = 0, do_sc = 0, i;
+    int do_hw = 0, do_fw = 0, do_sc = 0, do_li = 0, i;
     ULONG action, st, done;
     APIRET rc;
     MT7921_INFO info;
@@ -352,6 +407,8 @@ int main(int argc, char **argv)
             do_fw = 1;
         else if (!stricmp(argv[i], "/scan") || !stricmp(argv[i], "-scan"))
             do_sc = 1;
+        else if (!stricmp(argv[i], "/list") || !stricmp(argv[i], "-list"))
+            do_li = 1;
         else if (!strnicmp(argv[i], "/x:", 3))
             fwx_flags = (unsigned)strtoul(argv[i] + 3, NULL, 16);
         else
@@ -405,6 +462,8 @@ int main(int argc, char **argv)
         fw_boot();
     if (do_sc)
         do_scan();
+    if (do_li)
+        do_list();
 
     DosClose(hDev);
     return 0;

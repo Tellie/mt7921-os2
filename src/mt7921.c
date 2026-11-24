@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x0010          /* 0.16 */
+#define DRV_VERSION     0x0011          /* 0.17 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -127,6 +127,9 @@ USHORT DH_PhysToVirt(USHORT physHi, USHORT physLo, USHORT len);
 extern void FAR *VirtResult;
 #pragma aux VirtResult "*";
 
+void DH_Sleep(USHORT ms);
+#pragma aux DH_Sleep "*" parm [cx] modify [ax bx cx dx di si es];
+
 void PciCfgRd(USHORT addrHi, USHORT addrLo);
 #pragma aux PciCfgRd "*" parm [ax] [bx];
 void PciCfgWr(USHORT addrHi, USHORT addrLo, USHORT valLo, USHORT valHi);
@@ -180,7 +183,8 @@ static MT7921_INFO  gInfo;
 static USHORT       gLanNumber = 1;
 static int          gQuiet = 0;
 static int          gNoMem = 0;         /* /NOMEM: leave PCI command alone */
-static USHORT       gSels[3];           /* GDT selectors: BAR0, DMA, FW    */
+static USHORT       gSels[4];           /* GDT selectors: BAR0, DMA, FW, DMA2 */
+#define gDma2Sel gSels[3]               /* 2nd 64 KB DMA block: RX ring 4  */
 #define gSel    gSels[0]                /* BAR0 64 KB window (remapped)    */
 #define gDmaSel gSels[1]                /* the 64 KB DMA block             */
 #define gFwSel  gSels[2]                /* window into the firmware image  */
@@ -384,12 +388,12 @@ static void LoadFirmware(char FAR *args);
 #define OFS_FWDL    0x0040      /* TX ring 16 (FWDL)   16 desc        */
 #define OFS_WM      0x0140      /* TX ring 17 (MCU WM) 16 desc        */
 #define OFS_RX0     0x0240      /* RX ring 0  (MCU events) 8 desc     */
-#define OFS_RX2     0x0400      /* RX ring 2  (data)    8 desc        */
-#define OFS_RX4     0x0300      /* RX ring 4  (WA events) 4 desc      */
+#define OFS_RX2     0x0600      /* RX ring 2  (data)    8 desc        */
+#define OFS_RX4     0x0300      /* RX ring 4 (events + frames) 32 desc */
 #define OFS_CMD     0x1000      /* MCU command buffer (4 KB)          */
 #define OFS_RXB0    0x3000      /* RX0 buffers 8 x 2 KB               */
 #define OFS_RXB2    0xB000      /* RX2 buffers 8 x 2 KB (to 0xF000)   */
-#define OFS_RXB4    0x9000      /* RX4 buffers 4 x 2 KB               */
+#define OFS_RXB4    0x0000      /* RX4 buffers 32 x 2 KB, in DMA block 2 */
 #define RX_BUF      2048
 
 #define PATCH_NAME  "WIFI_MT7961_patch_mcu_1_2_hdr.bin"
@@ -397,6 +401,7 @@ static void LoadFirmware(char FAR *args);
 #define FW_MAX_SIZE 0x00400000UL                /* sanity: 4 MB */
 
 static ULONG  gDmaPhys;
+static ULONG  gDma2Phys;
 static ULONG  gFwPhys, gFwSize;
 static USHORT gFwState = FWS_NOT_FOUND;
 static char   gFwPath[160];
@@ -461,6 +466,20 @@ static void InitDma(void)
         return;
     }
     gDmaPhys = p.l;
+
+    /* v0.17: second 64 KB block for the 32 buffers of RX ring 4 */
+    if (DH_AllocPhys(1, 0)) {
+        MsgStr("MT7921.OS2: cannot allocate DMA memory (2)\r\n");
+        MsgFlush();
+        gDmaPhys = 0;
+        return;
+    }
+    p.l = PhysResult;
+    if (DH_PhysToGDTSel(p.w.hi, p.w.lo, 0, gDma2Sel)) {
+        gDmaPhys = 0;
+        return;
+    }
+    gDma2Phys = p.l;
     /* zeroed at task time (FwBoot): a GDT selector is ring 0 only */
 }
 
@@ -570,7 +589,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.16 - MediaTek MT7921 wireless (phase 4a)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.17 - MediaTek MT7921 wireless (phase 4b)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -597,8 +616,8 @@ static USHORT DoInit(RPH FAR *rph)
     MsgStr(" as lan"); MsgHex(gLanNumber, 1);
     MsgStr("\r\n");
 
-    if (DH_AllocGDTSel((USHORT FAR *)gSels, 3)) {
-        gSels[0] = gSels[1] = gSels[2] = 0;
+    if (DH_AllocGDTSel((USHORT FAR *)gSels, 4)) {
+        gSels[0] = gSels[1] = gSels[2] = gSels[3] = 0;
         MsgStr("MT7921.OS2: no GDT selectors - hardware access disabled\r\n");
     }
     MsgFlush();
@@ -823,17 +842,22 @@ typedef struct {
     ULONG  regs;            /* ring register block in BAR0          */
     USHORT desc;            /* descriptor offset in the DMA block   */
     USHORT n;
-    USHORT bufs;            /* RX: buffer offset in the DMA block   */
+    USHORT bufs;            /* RX: buffer offset in its block       */
     USHORT head;
     USHORT tail;
+    UCHAR  blk2;            /* RX buffers in DMA block 2 (v0.17)    */
 } RING;
+
+#define RING_BSEL(r)  ((r)->blk2 ? gDma2Sel : gDmaSel)
+#define RING_BPHYS(r) ((r)->blk2 ? gDma2Phys : gDmaPhys)
+#define RX_BUF_PTR(r, i) ((UCHAR FAR *)MkFar(RING_BSEL(r), (r)->bufs + (i) * RX_BUF))
 
 static RING rTx0  = { REG_TX_RING_BASE + 0x000, OFS_TX0,  4,  0 };
 static RING rFwdl = { REG_TX_RING_BASE + 0x100, OFS_FWDL, 16, 0 };
 static RING rWm   = { REG_TX_RING_BASE + 0x110, OFS_WM,   16, 0 };
 static RING rRx0  = { REG_RX_RING_BASE + 0x000, OFS_RX0,  8,  OFS_RXB0 };
 static RING rRx2  = { REG_RX_RING_BASE + 0x020, OFS_RX2,  8,  OFS_RXB2 };
-static RING rRx4  = { REG_RX_RING_BASE + 0x040, OFS_RX4,  4,  OFS_RXB4 };
+static RING rRx4  = { REG_RX_RING_BASE + 0x040, OFS_RX4,  32, OFS_RXB4, 0, 0, 1 };
 
 static UCHAR gSeq;
 static UCHAR gPayload[1200];                    /* hw_scan_req is 1186 bytes */
@@ -904,7 +928,7 @@ static void RingInitRx(RING *r)
     USHORT i, d;
     for (i = 0; i < r->n; i++) {
         d = r->desc + i * 16;
-        DmaWr(d + 0, gDmaPhys + r->bufs + i * RX_BUF);
+        DmaWr(d + 0, RING_BPHYS(r) + r->bufs + i * RX_BUF);
         DmaWrHL(d + 4, RX_BUF, 0);              /* SD_LEN0 = 2048 */
         DmaWr(d + 8, 0);
         DmaWr(d + 12, 0);
@@ -1066,7 +1090,7 @@ static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
         len = RxWait(&rr);
         if (!len)
             return 0xFFFF;
-        ev = (UCHAR FAR *)MkFar(gDmaSel, rr->bufs + rr->tail * RX_BUF);
+        ev = RX_BUF_PTR(rr, rr->tail);
         gBoot.LastEvtLen = len;
         FarCopy((UCHAR FAR *)gBoot.LastEvt, ev + 24, 24);
         if (len >= 33 && ev[29] == seq) {
@@ -1567,6 +1591,8 @@ static void Reattach(void)
 
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0x8000), 0x8000);
     RingInitTx(&rTx0);
     Wr(REG_TX_EXT_CTRL, 0x00000004UL);
     RingInitTx(&rWm);
@@ -1653,6 +1679,8 @@ static void FwBoot(void)
     }
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0x8000), 0x8000);
     gSeq = 0;
 
     /* patch header (mt76_connac2_patch_hdr, big endian) */
@@ -1872,122 +1900,164 @@ static USHORT ScnErr(USHORT st)
     return st == 0xFFFE ? SCN_ERR_TX : SCN_ERR_NO_EVENT;
 }
 
-/* remember a beacon / probe response found in an RX2 buffer          */
+/* ---- BSS table (v0.17) -------------------------------------------- */
+#define MAX_BSS     32
+#define MAX_IES     400
+
+typedef struct {
+    UCHAR  bssid[6];
+    UCHAR  ch;
+    signed char rssi;               /* dBm                             */
+    UCHAR  tsf[8];
+    USHORT bint;                    /* beacon interval                 */
+    USHORT cap;                     /* capability information          */
+    USHORT ielen;
+    UCHAR  ssidlen;
+    char   ssid[32];
+    UCHAR  ies[MAX_IES];            /* variable IEs (after fixed part) */
+} BSSE;
+
+static BSSE   gBss[MAX_BSS];
+static USHORT gNBss;
+static int    gScanReady;                       /* ScanPrep done       */
+static int    gHwBusy;                          /* FwBoot / scan active */
+
+/* RX descriptor of a frame (mt7921_mac_fill_rx): 6 dwords, then the
+ * optional groups 4 (16 bytes), 1 (16), 2 (8), 3 (8, RXV with RCPI),
+ * 5 (96); then 2 * HDR_OFFSET pad bytes; then the 802.11 header.
+ * rxd1 bits 11..15 = groups 1,2,3,4,5 (byte 5, bits 3..7)           */
 static void ParseFrame(UCHAR FAR *b, USHORT len)
 {
-    USHORT off, hdr = 0xFFFF, p, end, i;
-    MT7921_BSS *e = 0;
+    USHORT hdr = 24, v1 = 0xFFFF, p, i, n;
+    UCHAR g = b[5], rcpi;
+    int rssi;
+    BSSE *e = 0;
 
-    /* the RX descriptor in front of the 802.11 header has a variable
-     * size; look for frame control 0x80 00 (beacon, DA broadcast) or
-     * 0x50 00 (probe response, DA = our MAC)                          */
-    for (off = 16; off + 36 < len && off < 160; off += 2) {
-        if (b[off + 1] != 0) continue;
-        if (b[off] == 0x80) {
-            for (i = 0; i < 6 && b[off + 4 + i] == 0xFF; i++) ;
-            if (i == 6) { hdr = off; break; }
-        } else if (b[off] == 0x50) {
-            for (i = 0; i < 6 && b[off + 4 + i] == gMac[i]; i++) ;
-            if (i == 6) { hdr = off; break; }
+    if (len < 64) return;
+    if (g & 0x40) hdr += 16;                    /* group 4 */
+    if (g & 0x08) hdr += 16;                    /* group 1 */
+    if (g & 0x10) hdr += 8;                     /* group 2 */
+    if (g & 0x20) {                             /* group 3: RXV */
+        v1 = hdr + 4;
+        hdr += 8;
+        if (g & 0x80) {                         /* group 5 */
+            hdr += 24;
+            v1 = hdr;
+            hdr += 48;
         }
     }
-    if (hdr == 0xFFFF) return;
+    hdr += 2 * (b[9] >> 6);                     /* rxd2 HDR_OFFSET */
+    if (hdr + 36 > len) return;
+
+    /* beacon (80 00) or probe response (50 00) */
+    if ((b[hdr] != 0x80 && b[hdr] != 0x50) || b[hdr + 1] != 0)
+        return;
     gScan.Beacons++;
 
-    for (i = 0; i < gScan.NBss; i++) {
+    for (i = 0; i < gNBss; i++) {
         USHORT k;
-        for (k = 0; k < 6 && gScan.Bss[i].Bssid[k] == b[hdr + 16 + k]; k++) ;
-        if (k == 6) { e = &gScan.Bss[i]; break; }
+        for (k = 0; k < 6 && gBss[i].bssid[k] == b[hdr + 16 + k]; k++) ;
+        if (k == 6) { e = &gBss[i]; break; }
     }
     if (!e) {
-        if (gScan.NBss >= SCAN_MAX_BSS) return;
-        e = &gScan.Bss[gScan.NBss++];
-        for (i = 0; i < 6; i++) e->Bssid[i] = b[hdr + 16 + i];
+        if (gNBss >= MAX_BSS) return;
+        e = &gBss[gNBss++];
+        for (i = 0; i < 6; i++) e->bssid[i] = b[hdr + 16 + i];
     }
 
-    end = len;
-    for (p = hdr + 36; p + 2 <= end; ) {
-        UCHAR id = b[p], l = b[p + 1];
-        if (p + 2 + l > end) break;
-        if (id == 0) {                          /* SSID */
-            e->SsidLen = l > 32 ? 32 : l;
-            for (i = 0; i < e->SsidLen; i++) e->Ssid[i] = (char)b[p + 2 + i];
-        } else if (id == 3 && l >= 1) {         /* DS parameter set */
-            e->Channel = b[p + 2];
+    e->ch = b[13];                              /* rxd3 CH_FREQ    */
+    rssi = -127;
+    if (v1 != 0xFFFF) {
+        rcpi = b[v1] > b[v1 + 1] ? b[v1] : b[v1 + 1];
+        rssi = ((int)rcpi - 220) / 2;           /* to_rssi()       */
+    }
+    e->rssi = (signed char)rssi;
+    for (i = 0; i < 8; i++) e->tsf[i] = b[hdr + 24 + i];
+    e->bint = (USHORT)(b[hdr + 32] | ((USHORT)b[hdr + 33] << 8));
+    e->cap  = (USHORT)(b[hdr + 34] | ((USHORT)b[hdr + 35] << 8));
+
+    n = len - (hdr + 36);
+    if (n > MAX_IES) n = MAX_IES;
+    FarCopy((UCHAR FAR *)e->ies, b + hdr + 36, n);
+    e->ielen = n;
+
+    for (p = 0; p + 2 <= n; ) {
+        UCHAR id = e->ies[p], l = e->ies[p + 1];
+        if (p + 2 + l > n) break;
+        if (id == 0) {
+            e->ssidlen = l > 32 ? 32 : l;
+            for (i = 0; i < e->ssidlen; i++) e->ssid[i] = (char)e->ies[p + 2 + i];
+        } else if (id == 3 && l >= 1 && !e->ch) {
+            e->ch = e->ies[p + 2];
         }
         p += 2 + l;
     }
 }
 
-/* poll RX ring 2 (frames) and rings 0/4 (events) until SCAN_DONE    */
-static void ScanCollect(void)
+/* one RX buffer from ring 0/4: event or (pkt type 7, flag 1) frame */
+static void RxBuffer(RING *r, USHORT len)
 {
-    static RING *evr[2] = { &rRx0, &rRx4 };
-    ULONG n;
-    U32W c;
-    int k;
-
-    for (n = 1; n <= SCAN_LIMIT; n++) {
-        c.l = DmaRd(rRx2.desc + rRx2.tail * 16 + 4);
-        if (c.w.hi & DESC_DMA_DONE_HI) {
-            USHORT len = (USHORT)(c.w.hi & 0x3FFF);
-            UCHAR FAR *b = (UCHAR FAR *)MkFar(gDmaSel, rRx2.bufs + rRx2.tail * RX_BUF);
-            if (gScan.Frames == 0) {
-                gScan.FirstLen = len;
-                FarCopy((UCHAR FAR *)gScan.FirstFrame, b, len < 64 ? len : 64);
-            }
-            gScan.Frames++;
-            if (len > RX_BUF) len = RX_BUF;
-            ParseFrame(b, len);
-            RxRelease(&rRx2);
-            continue;
+    UCHAR FAR *ev = RX_BUF_PTR(r, r->tail);
+    if (len > RX_BUF) len = RX_BUF;
+    if ((ev[3] >> 3) == 7 && (ev[2] & 0x0F) == 1) {     /* NORMAL_MCU frame */
+        if (gScan.Events == 0) {
+            gScan.FirstLen = len;
+            FarCopy((UCHAR FAR *)gScan.FirstFrame, ev, len < 64 ? len : 64);
         }
-        for (k = 0; k < 2; k++) {
-            RING *r = evr[k];
-            c.l = DmaRd(r->desc + r->tail * 16 + 4);
-            if (c.w.hi & DESC_DMA_DONE_HI) {
-                USHORT len = (USHORT)(c.w.hi & 0x3FFF);
-                UCHAR FAR *ev = (UCHAR FAR *)MkFar(gDmaSel, r->bufs + r->tail * RX_BUF);
-                if (len > RX_BUF) len = RX_BUF;
-                if (ev[28] == MCU_EVENT_SCAN_DONE) {
-                    gScan.ScanDone = 1;
-                    FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
-                } else {
-                    /* v0.16: during the scan the beacons arrive here (ring 4),
-                     * not on RX ring 2: treat them as frames too           */
-                    if (gScan.Events < 8)
-                        gScan.EvtIds[(USHORT)gScan.Events] = ev[28];
-                    if (gScan.Events == 0 && gScan.Frames == 0) {
-                        gScan.FirstLen = len;
-                        FarCopy((UCHAR FAR *)gScan.FirstFrame, ev, len < 64 ? len : 64);
-                    }
-                    gScan.Events++;
-                    ParseFrame(ev, len);
-                }
-                RxRelease(r);
-            }
-        }
-        if (gScan.ScanDone) break;
-        (void)Rd(REG_GLO_CFG);                  /* pace the loop */
+        gScan.Events++;
+        ParseFrame(ev, len);
+    } else if (ev[28] == MCU_EVENT_SCAN_DONE) {
+        gScan.ScanDone = 1;
+        FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
+    } else {
+        if (gScan.Frames < 8)                   /* reuse: other events */
+            gScan.EvtIds[(USHORT)gScan.Frames] = ev[28];
+        gScan.Frames++;
     }
-    gScan.Polls = n;
+    RxRelease(r);
 }
 
-static void DoScan(void)
+/* drain all completed RX buffers of rings 0, 4 and 2; returns count  */
+static USHORT RxDrain(void)
+{
+    static RING *rr[3] = { &rRx4, &rRx0, &rRx2 };
+    USHORT got = 0;
+    int k;
+    U32W c;
+
+    for (k = 0; k < 3; k++) {
+        RING *r = rr[k];
+        for (;;) {
+            c.l = DmaRd(r->desc + r->tail * 16 + 4);
+            if (!(c.w.hi & DESC_DMA_DONE_HI)) break;
+            RxBuffer(r, (USHORT)(c.w.hi & 0x3FFF));
+            got++;
+        }
+    }
+    return got;
+}
+
+/* wait for SCAN_DONE; sleep 16 ms between polls so OS/2 keeps running */
+static void ScanCollect(void)
+{
+    USHORT t;
+    for (t = 0; t < 600 && !gScan.ScanDone; t++) {   /* ~10 s max */
+        RxDrain();
+        if (gScan.ScanDone) break;
+        DH_Sleep(16);
+    }
+    RxDrain();
+    gScan.Polls = t;
+}
+
+/* once per firmware start: EFUSE mode .. BSS_INFO (Linux init_hardware,
+ * start and add_interface)                                           */
+static void ScanPrep(void)
 {
     USHORT st, i;
 
-    FarZero((UCHAR FAR *)&gScan, sizeof(gScan));
-    gScan.Magic = MT7921_SCAN_MAGIC;
-    gScan.StEfuse = gScan.StMacEn = gScan.StScan = 0xFFFF;
-    gScan.StChanDom = gScan.StRxPath = 0xFFFF;
-    gScan.DevUni = gScan.BssUni = 0xFFFFFFFFUL;
-
-    if (!gFwRunning) { Scn(SCN_STEP_START, SCN_ERR_NO_FW); return; }
-
     /* 1. mt7921_mcu_set_eeprom: buffer_mode EFUSE, format WHOLE */
     PayloadZero(4);
-    gPayload[0] = 0;                            /* EE_MODE_EFUSE    */
     gPayload[1] = 1;                            /* EE_FORMAT_WHOLE  */
     gKind = MK_EXT; gExtCid = MCU_EXT_CMD_EFUSE_BUFFER_MODE;
     st = McuSend(0xED, 4, 1);
@@ -1996,21 +2066,19 @@ static void DoScan(void)
 
     /* 2. mt76_connac_mcu_set_mac_enable(band 0, enable) */
     PayloadZero(4);
-    gPayload[0] = 1;                            /* enable */
+    gPayload[0] = 1;
     gKind = MK_EXT; gExtCid = MCU_EXT_CMD_MAC_INIT_CTRL;
     st = McuSend(0xED, 4, 1);
     gScan.StMacEn = st;
     if (st >= 0xFFFE) { Scn(SCN_STEP_MAC_EN, ScnErr(st)); return; }
 
-    /* 2a. mt76_connac_mcu_set_channel_domain: hdr { alpha2[4], bw_2g 0,
-     *     bw_5g 3, bw_6g 3, pad, n_2ch, n_5ch, n_6ch, pad2 } then
-     *     { le16 hw_value, le16 pad, le32 flags } per channel; no answer */
+    /* 2a. SET_CHAN_DOMAIN: hdr { alpha2[4], bw_2g, bw_5g, bw_6g, pad,
+     *     n_2ch, n_5ch, n_6ch, pad2 }, { le16 ch, le16 pad, le32 flags } */
     {
         USHORT p = 12, k;
         PayloadZero(12 + (sizeof(gCh2g) + sizeof(gCh5g)) * 8);
         gPayload[0] = 'N'; gPayload[1] = 'L';
-        gPayload[4] = 0;                        /* bw_2g 20/40          */
-        gPayload[5] = 3;                        /* bw_5g up to 160      */
+        gPayload[5] = 3;
         gPayload[6] = 3;
         gPayload[8] = sizeof(gCh2g);
         gPayload[9] = sizeof(gCh5g);
@@ -2018,8 +2086,8 @@ static void DoScan(void)
             gPayload[p] = gCh2g[k];
         for (k = 0; k < sizeof(gCh5g); k++, p += 8) {
             gPayload[p] = gCh5g[k];
-            if (gCh5g[k] >= 52)                 /* DFS: passive + radar */
-                gPayload[p + 4] = 0x0A;
+            if (gCh5g[k] >= 52)
+                gPayload[p + 4] = 0x0A;         /* NO_IR | RADAR */
         }
         gSetQuery = MCU_Q_SET;
         st = McuSend(MCU_CE_CMD_SET_CHAN_DOMAIN, p, 0);
@@ -2027,65 +2095,175 @@ static void DoScan(void)
         if (st >= 0xFFFE) { Scn(SCN_STEP_CHAN_DOM, SCN_ERR_TX); return; }
     }
 
-    /* 2b. mt7921_mcu_set_chan_info(SET_RX_PATH): channel 1, 20 MHz,
-     *     2 TX streams, RX mask 3, normal switch, band 0, 2.4 GHz     */
+    /* 2b. SET_RX_PATH: channel 1, 20 MHz, 2 TX streams, RX mask 3 */
     PayloadZero(76);
-    gPayload[0] = 1;                            /* control_ch          */
-    gPayload[1] = 1;                            /* center_ch           */
-    gPayload[2] = 0;                            /* bw 20 MHz           */
-    gPayload[3] = 2;                            /* tx_streams_num      */
-    gPayload[4] = 3;                            /* rx_streams (mask)   */
+    gPayload[0] = 1; gPayload[1] = 1; gPayload[3] = 2; gPayload[4] = 3;
     gKind = MK_EXT; gExtCid = MCU_EXT_CMD_SET_RX_PATH;
     st = McuSend(0xED, 76, 1);
     gScan.StRxPath = st;
     if (st >= 0xFFFE) { Scn(SCN_STEP_RX_PATH, ScnErr(st)); return; }
 
-    /* 3. uni_add_dev: DEV_INFO_UPDATE { omac 0, band 0, pad;
-     *    tlv: tag 0 ACTIVE, len 12, active 1, link 0, omac_addr }    */
+    /* 3. DEV_INFO_UPDATE */
     PayloadZero(16);
-    gPayload[4] = 0;  gPayload[5] = 0;          /* tag DEV_INFO_ACTIVE */
-    gPayload[6] = 12; gPayload[7] = 0;          /* len                 */
-    gPayload[8] = 1;                            /* active              */
+    gPayload[6] = 12;                           /* tlv len    */
+    gPayload[8] = 1;                            /* active     */
     for (i = 0; i < 6; i++) gPayload[10 + i] = gMac[i];
     gKind = MK_UNI;
     st = McuSend(MCU_UNI_CMD_DEV_INFO_UPDATE, 16, 1);
     if (st >= 0xFFFE) { Scn(SCN_STEP_DEV_INFO, ScnErr(st)); return; }
     gScan.DevUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
 
-    /* 4. BSS_INFO_UPDATE { bss_idx 0, pad[3]; basic tlv (32 bytes):
-     *    tag 0, len 32, active 1, omac 0, hw_bss 0, band 0,
-     *    conn_type INFRA_STA (0x10001), conn_state 1, rest 0 }        */
+    /* 4. BSS_INFO_UPDATE (basic, station) */
     PayloadZero(36);
-    gPayload[4] = 0;  gPayload[5] = 0;          /* UNI_BSS_INFO_BASIC */
-    gPayload[6] = 32; gPayload[7] = 0;
-    gPayload[8] = 1;                            /* active            */
-    gPayload[12] = 0x01; gPayload[13] = 0x00;   /* conn_type le32    */
-    gPayload[14] = 0x01; gPayload[15] = 0x00;
-    gPayload[16] = 1;                           /* conn_state        */
+    gPayload[6] = 32;
+    gPayload[8] = 1;
+    gPayload[12] = 0x01; gPayload[14] = 0x01;   /* CONNECTION_INFRA_STA */
+    gPayload[16] = 1;
     gKind = MK_UNI;
     st = McuSend(MCU_UNI_CMD_BSS_INFO_UPDATE, 36, 1);
     if (st >= 0xFFFE) { Scn(SCN_STEP_BSS_INFO, ScnErr(st)); return; }
     gScan.BssUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
 
-    /* 5. hw_scan: passive, all channels, wildcard SSID, split scan */
+    gScanReady = 1;
+}
+
+/* hw_scan + collect into gBss[] */
+static void ScanRun(void)
+{
+    USHORT st, i;
+    static UCHAR seq;
+
+    gNBss = 0;
+    RxDrain();                                  /* old events away */
+
     PayloadZero(1186);
-    gPayload[0] = 1;                            /* seq_num, band 0    */
-    gPayload[1] = 0;                            /* bss_idx            */
-    gPayload[2] = 0;                            /* passive            */
+    seq = (UCHAR)((seq + 1) & 0x7F);
+    if (!seq) seq = 1;
+    gPayload[0] = seq;                          /* seq_num, band 0    */
     gPayload[3] = 0x01;                         /* wildcard SSID      */
     gPayload[6] = 0x20;                         /* SCAN_FUNC_SPLIT_SCAN */
     gPayload[7] = 1;                            /* version            */
-    gPayload[158] = 0;                          /* channel_type: all  */
-    for (i = 0; i < 6; i++) gPayload[1110 + i] = 0xFF;  /* bssid any */
+    for (i = 0; i < 6; i++) gPayload[1110 + i] = 0xFF;
     gSetQuery = MCU_Q_SET;
-    st = McuSend(MCU_CE_CMD_START_HW_SCAN, 1186, 0);    /* no answer */
+    st = McuSend(MCU_CE_CMD_START_HW_SCAN, 1186, 0);
     gScan.StScan = st;
     if (st >= 0xFFFE) { Scn(SCN_STEP_HW_SCAN, SCN_ERR_TX); return; }
 
-    /* 6. beacons on RX ring 2 until the SCAN_DONE event */
     ScanCollect();
     if (!gScan.ScanDone) { Scn(SCN_STEP_COLLECT, SCN_ERR_NO_DONE); return; }
     Scn(SCN_STEP_DONE, SCN_OK);
+}
+
+static void ScanReset(void)
+{
+    FarZero((UCHAR FAR *)&gScan, sizeof(gScan));
+    gScan.Magic = MT7921_SCAN_MAGIC;
+    gScan.StEfuse = gScan.StMacEn = gScan.StScan = 0xFFFF;
+    gScan.StChanDom = gScan.StRxPath = 0xFFFF;
+    gScan.DevUni = gScan.BssUni = 0xFFFFFFFFUL;
+}
+
+/* full path used by BSSID_LIST_SCAN and /scan: firmware, prep, scan */
+static void DoScan(void)
+{
+    USHORT i, k;
+
+    ScanReset();
+    if (!gFwRunning) {
+        gFwx = 0;
+        FwBoot();
+    }
+    if (!gFwRunning) { Scn(SCN_STEP_START, SCN_ERR_NO_FW); return; }
+    if (!gScanReady) {
+        ScanPrep();
+        if (!gScanReady) return;
+    } else {
+        gScan.StEfuse = gScan.StMacEn = gScan.StRxPath = 0;  /* done before */
+        gScan.StChanDom = 0;
+        gScan.DevUni = gScan.BssUni = 0;
+    }
+    ScanRun();
+
+    /* summary for wrndtest /scan */
+    gScan.NBss = gNBss;
+    for (i = 0; i < gNBss && i < SCAN_MAX_BSS; i++) {
+        MT7921_BSS *d = &gScan.Bss[i];
+        for (k = 0; k < 6; k++) d->Bssid[k] = gBss[i].bssid[k];
+        d->Channel = gBss[i].ch;
+        d->SsidLen = gBss[i].ssidlen;
+        for (k = 0; k < 32; k++) d->Ssid[k] = gBss[i].ssid[k];
+        gScan.Rssi[i] = gBss[i].rssi;
+    }
+}
+
+/* ---- OID_802_11_BSSID_LIST: NDIS_802_11_BSSID_LIST_EX --------------- */
+/* NDIS_WLAN_BSSID_EX as driver_genmac.c sees it (116 bytes + IEs):
+ *   0 Length, 4 MacAddress[6], 10 Reserved[2], 12 Ssid{len, [32]},
+ *  48 Privacy, 52 Rssi, 56 NetworkTypeInUse, 60 Configuration{Length,
+ *  BeaconPeriod, ATIMWindow, DSConfig (kHz), FH{4 x ULONG}},
+ *  92 InfrastructureMode, 96 SupportedRates[16], 112 IELength,
+ * 116 IEs = FIXED_IEs{Timestamp[8], BeaconInterval, Capabilities}+IEs */
+static void FarLe32(UCHAR FAR *p, ULONG v)
+{
+    union { ULONG l; UCHAR b[4]; } u;
+    u.l = v;
+    p[0] = u.b[0]; p[1] = u.b[1]; p[2] = u.b[2]; p[3] = u.b[3];
+}
+
+static ULONG ChanKHz(UCHAR ch)
+{
+    ULONG mhz;
+    if (ch == 14)      mhz = 2484;
+    else if (ch < 14)  mhz = 2407 + 5 * (USHORT)ch;
+    else               mhz = 5000 + 5 * (USHORT)ch;
+    /* * 1000 without __U4M: 1024x - 16x - 8x */
+    return (mhz << 10) - (mhz << 4) - (mhz << 3);
+}
+
+static ULONG BuildBssList(UCHAR FAR *d, ULONG len, ULONG *done)
+{
+    USHORT pos = 4, i, k, cnt = 0;
+
+    if (len < 4) { *done = 4; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+    for (i = 0; i < gNBss; i++) {
+        BSSE *e = &gBss[i];
+        USHORT need = (USHORT)((116 + 12 + e->ielen + 3) & ~3);
+        USHORT nr = 0, p;
+        UCHAR FAR *x;
+
+        if ((ULONG)pos + need > len) break;
+        x = d + pos;
+        FarZero(x, need);
+        FarLe32(x + 0, need);
+        for (k = 0; k < 6; k++) x[4 + k] = e->bssid[k];
+        FarLe32(x + 12, e->ssidlen);
+        for (k = 0; k < e->ssidlen; k++) x[16 + k] = (UCHAR)e->ssid[k];
+        FarLe32(x + 48, (e->cap & 0x0010) ? 1 : 0);         /* privacy */
+        FarLe32(x + 52, (ULONG)(long)e->rssi);
+        FarLe32(x + 56, e->ch > 14 ? 2 : 3);    /* Ndis802_11OFDM5 / OFDM24 */
+        FarLe32(x + 60, 32);                    /* Configuration.Length */
+        FarLe32(x + 64, e->bint);
+        FarLe32(x + 72, ChanKHz(e->ch));
+        FarLe32(x + 76, 16);                    /* FHConfig.Length      */
+        FarLe32(x + 92, (e->cap & 0x0002) ? 0 : 1);         /* IBSS : ESS */
+        for (p = 0; p + 2 <= e->ielen; p += 2 + e->ies[p + 1]) {
+            UCHAR id = e->ies[p], l = e->ies[p + 1];
+            if (p + 2 + l > e->ielen) break;
+            if (id == 1 || id == 50)            /* (extended) rates */
+                for (k = 0; k < l && nr < 16; k++)
+                    x[96 + nr++] = e->ies[p + 2 + k];
+        }
+        FarLe32(x + 112, 12 + e->ielen);
+        for (k = 0; k < 8; k++) x[116 + k] = e->tsf[k];
+        x[124] = (UCHAR)e->bint; x[125] = (UCHAR)(e->bint >> 8);
+        x[126] = (UCHAR)e->cap;  x[127] = (UCHAR)(e->cap >> 8);
+        FarCopy(x + 128, (UCHAR FAR *)e->ies, e->ielen);
+        pos += need;
+        cnt++;
+    }
+    FarLe32(d, cnt);
+    *done = pos;
+    return NDIS_STATUS_SUCCESS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2131,12 +2309,18 @@ static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
         return PutBytes(data, len, (UCHAR FAR *)&gInfo, sizeof(gInfo), done);
     case OID_PRIVATE_MT7921_SCAN:
         if (len < sizeof(gScan)) { *done = sizeof(gScan); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1;
         DoScan();
+        gHwBusy = 0;
         return PutBytes(data, len, (UCHAR FAR *)&gScan, sizeof(gScan), done);
     case OID_PRIVATE_MT7921_FWBOOT:
         if (len < sizeof(gBoot)) { *done = sizeof(gBoot); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
         gFwx = *(USHORT FAR *)data;             /* flags come in Magic */
+        gHwBusy = 1;
         FwBoot();
+        gHwBusy = 0;
         return PutBytes(data, len, (UCHAR FAR *)&gBoot, sizeof(gBoot), done);
     case OID_PRIVATE_MT7921_HWPROBE:
         if (len < sizeof(gProbe)) { *done = sizeof(gProbe); return NDIS_STATUS_BUFFER_TOO_SHORT; }
@@ -2156,8 +2340,8 @@ static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
         FarZero(data, 36);
         *done = 36;
         return NDIS_STATUS_SUCCESS;
-    case OID_802_11_BSSID_LIST:                 /* no scan results yet */
-        return PutU32(data, len, 0, done);
+    case OID_802_11_BSSID_LIST:                 /* v0.17: real results */
+        return BuildBssList(data, len, done);
 
     case OID_802_11_BSSID:      /* failing = "disconnected" for the poll */
     default:
@@ -2171,6 +2355,14 @@ static ULONG OidSet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
     switch (oid) {
     case OID_PRIVATE_WRAPPER_802_1X_STATE:
         return GetU32(data, len, &g8021xState, done);
+    case OID_802_11_BSSID_LIST_SCAN:            /* v0.17: scan now (blocks
+                                                   ~1-2 s, sleeping)     */
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1;
+        DoScan();
+        gHwBusy = 0;
+        *done = len;
+        return gScan.Error == SCN_OK ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
     case OID_802_11_AUTHENTICATION_MODE:
         return GetU32(data, len, &gAuthMode, done);
     case OID_802_11_ENCRYPTION_STATUS:
@@ -2181,7 +2373,6 @@ static ULONG OidSet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
     /* accepted, but nothing happens yet (no radio in phase 1) */
     case OID_GEN_CURRENT_PACKET_FILTER:
     case OID_802_3_MULTICAST_LIST:
-    case OID_802_11_BSSID_LIST_SCAN:
     case OID_802_11_SSID:
     case OID_802_11_BSSID:
     case OID_802_11_DISASSOCIATE:

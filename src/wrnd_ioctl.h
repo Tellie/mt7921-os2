@@ -137,6 +137,8 @@ typedef struct _WRND_PARM {
 #define NDIS_STATUS_NOT_SUPPORTED      0xC00000BBUL
 #define NDIS_STATUS_INVALID_LENGTH     0xC0010014UL
 #define NDIS_STATUS_BUFFER_TOO_SHORT   0xC0010016UL
+#define NDIS_STATUS_RESOURCES          0xC000009AUL
+#define NDIS_STATUS_FAILURE            0xC0000001UL
 
 #define WRND_MAX_DATA                  10000UL  /* caller caps Parm[1] */
 
@@ -255,7 +257,7 @@ typedef struct _MT7921_FWBOOT {     /* 328 bytes */
     unsigned long  ChipId;
     unsigned long  PciCmd;          /* config dword 0x04 after BM on  */
     unsigned long  GloCfg;          /* WFDMA0_GLO_CFG after enable    */
-    unsigned long  Polls;           /* polls of the step that ended   */
+    unsigned long  Polls;           /* v0.17: 16 ms sleeps            */           /* polls of the step that ended   */
     unsigned short SemGet;          /* status byte, 0xFFFF = none     */
     unsigned short SemRel;
     unsigned short Finish;
@@ -367,7 +369,7 @@ typedef struct _MT7921_BSS {        /* 40 bytes */
     char           Ssid[32];
 } MT7921_BSS;
 
-typedef struct _MT7921_SCAN {       /* 808 bytes */
+typedef struct _MT7921_SCAN {       /* 824 bytes */
     unsigned long  Magic;
     unsigned short Step;
     unsigned short Error;
@@ -377,11 +379,11 @@ typedef struct _MT7921_SCAN {       /* 808 bytes */
     unsigned long  BssUni;
     unsigned short StScan;          /* 0 = taken by DMA (no answer)   */
     unsigned short ScanDone;        /* 1 = SCAN_DONE event seen       */
-    unsigned long  Frames;          /* RX ring 2 frames               */
+    unsigned long  Frames;          /* v0.17: other MCU events        */
     unsigned long  Beacons;         /* beacons / probe responses      */
-    unsigned long  Events;          /* other MCU events while waiting */
+    unsigned long  Events;          /* v0.17: frames on the MCU rings */
     unsigned long  Polls;
-    unsigned short NBss;
+    unsigned short NBss;            /* networks found (up to 32)      */
     unsigned short FirstLen;        /* length of the first RX2 frame  */
     unsigned char  FirstFrame[64];  /* its first 64 bytes (RXD layout) */
     MT7921_BSS     Bss[SCAN_MAX_BSS];
@@ -393,6 +395,8 @@ typedef struct _MT7921_SCAN {       /* 808 bytes */
                                        [5] current_state, [8..11]
                                        beacon_scan_num, [20..22] alpha2 */
     unsigned char  EvtIds[8];       /* eid of the first other events  */
+    /* v0.17 */
+    signed char    Rssi[SCAN_MAX_BSS];  /* dBm per Bss[] entry          */
 } MT7921_SCAN;
 #pragma pack()
 
