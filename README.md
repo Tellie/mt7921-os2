@@ -15,7 +15,7 @@ can drive it without changes. See `src/wrnd_ioctl.h` for the interface.
 | 2 | Enable PCI memory, map BAR0, fw/driver-own handshake, read chip ID | done (v0.04) |
 | 3a | ROM patch from disk, bus master, WFDMA rings, MCU messages, ROM patch download | done (v0.10) |
 | 3b | RAM code download, FW_START, N9 ready | done (v0.11) |
-| 3c | PCIe bus reset (warm reboot), NIC capability, real MAC address | **this version (v0.12)** |
+| 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | **this version (v0.13)** |
 | 3d | IRQ handler instead of polling | |
 | 4 | MCU commands: read MAC from EEPROM, hw_scan → `BSSID_LIST` | |
 | 5 | Mini-MLME: auth/assoc, EAPOL via 802_1X_RX/TX, keys via ADD_KEY | |
@@ -80,8 +80,8 @@ Phase 3a ROM patch download (the system pauses for a few seconds):
 wrndtest /fw
 ```
 
-Since v0.12 `/fw` first resets the card with a PCIe secondary bus reset, so a
-warm reboot is fine. Expected: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
+After a warm reboot the WiFi firmware is still running in the chip; since
+v0.13 `/fw` then reuses it and only sets up the host DMA again. Expected: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
 (sem get 1 = the patch was already loaded). The WFSYS reset is off by
 default since v0.10 (`/x:8` turns it on; with it the WFDMA never starts).
 

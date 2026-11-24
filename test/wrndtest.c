@@ -147,10 +147,11 @@ static void fw_boot(void)
     printf("  result          %s at step %u (%s)\n",
            fwb_err(b.Error), b.Step, fwb_step(b.Step));
     {
-        static const char *br[] = { "not needed (firmware already running)",
-            "done", "FAILED - card did not come back", "no root port found",
-            "skipped (/x:40)" };
-        printf("  PCIe bus reset  %s", b.BusReset < 5 ? br[b.BusReset] : "?");
+        static const char *br[] = { "-, firmware started earlier in this session",
+            "PCIe bus reset done", "PCIe bus reset FAILED - card did not come back",
+            "no root port found", "cold start",
+            "firmware from previous session reused (host DMA re-set up)" };
+        printf("  start mode      %s", b.BusReset < 6 ? br[b.BusReset] : "?");
         if (b.BusReset == 1 || b.BusReset == 2)
             printf(", card answered after %lu config reads", b.ResetPolls);
         printf("\n");
@@ -244,7 +245,8 @@ static void fw_boot(void)
     if (b.Error == 0 && b.Step == 14) {
         if (b.SemGet == 0xFFFF)
             printf("\n  => WiFi firmware was already running%s\n",
-                   b.NicStatus == 0 ? " and answers commands" : "");
+                   b.NicStatus == 0 ? " and answers commands" :
+                   " but did NOT answer the NIC capability command");
         else
             printf("\n  => WiFi firmware is RUNNING: patch %s, RAM code started, N9 ready\n",
                    b.SemGet == 1 ? "was already loaded" : "downloaded");

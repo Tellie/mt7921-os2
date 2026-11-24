@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x000C          /* 0.12 */
+#define DRV_VERSION     0x000D          /* 0.13 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -570,7 +570,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.12 - MediaTek MT7921 wireless (phase 3c)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.13 - MediaTek MT7921 wireless (phase 3c)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -1523,6 +1523,56 @@ static void NicCap(void)
     gBoot.CapMask = m.l;
 }
 
+/* ---- reuse firmware from a previous session (v0.13) -------------- */
+/* Order matters: the old DMA rings may point into memory that OS/2
+ * has since given to someone else (maybe even to us). So: take driver
+ * ownership, stop WFDMA while bus mastering is still off, then build
+ * fresh rings, and only then allow bus mastering and start WFDMA.    */
+static void Reattach(void)
+{
+    ULONG n;
+    U32W a;
+
+    gBoot.BusReset = BRS_REATTACHED;
+
+    if (OwnHandshake()) { Fwb(FWB_STEP_OWN, FWB_ERR_TIMEOUT); return; }
+    gBoot.ChipId = L1Rd(HW_CHIPID);
+    a.l = gBoot.ChipId;
+    if (a.w.lo != 0x7961) { Fwb(FWB_STEP_CHIPID, FWB_ERR_CHIPID); return; }
+
+    Wr(REG_HOST_INT_ENA, 0);
+    DmaDisable();                       /* stop stale DMA first          */
+
+    FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    RingInitTx(&rTx0);
+    Wr(REG_TX_EXT_CTRL, 0x00000004UL);
+    RingInitTx(&rWm);
+    RingInitTx(&rFwdl);
+    RingInitRx(&rRx0);
+    RingInitRx(&rRx4);
+    RingInitRx(&rRx2);
+
+    EnableBusMaster();
+    if (!(gBoot.PciCmd & 0x0004)) { Fwb(FWB_STEP_BUSMASTER, FWB_ERR_TIMEOUT); return; }
+    Wr(0x00010188UL, 0x000000FFUL);     /* PCIE_MAC_INT_ENABLE */
+    DmaEnable();
+    gBoot.GloCfg = Rd(REG_GLO_CFG);
+
+    /* mt7921e_driver_own + L0s off, as after a normal boot */
+    L1Wr(L1_TOP_LPCR_HOST_BAND0, 0x00000002UL);
+    for (n = 1; n <= 500000UL; n++)
+        if (!(L1Rd(L1_TOP_LPCR_HOST_BAND0) & 0x00000001UL))
+            break;
+    gBoot.Polls = n;
+    if (n > 500000UL) { Fwb(FWB_STEP_MCU_OWN, FWB_ERR_TIMEOUT); return; }
+    Set(REG_PCIE_MAC_PM, 0x00000100UL);
+
+    gFwRunning = 1;
+    Fwb(FWB_STEP_DONE, FWB_OK);
+    NicCap();
+}
+
 static void FwBoot(void)
 {
     ULONG n, v;
@@ -1564,14 +1614,24 @@ static void FwBoot(void)
     if (!gDmaPhys)                       { Fwb(FWB_STEP_START, FWB_ERR_NO_DMA); return; }
 
     /* v0.12: cold chip via PCIe secondary bus reset (warm reboot fix) */
-    if (gFwx & FWX_NO_BUS_RESET) {
+    if (!(gFwx & FWX_BUS_RESET)) {
         gBoot.BusReset = BRS_SKIPPED;
     } else {
         gBoot.BusReset = BusReset();
         if (gBoot.BusReset == BRS_FAILED) { Fwb(FWB_STEP_START, FWB_ERR_TIMEOUT); return; }
     }
+
+    /* v0.13: WiFi firmware still running from a previous session (warm
+     * reboot): keep it and only set up the host side again, like the
+     * Linux wake-up path (mt792x_wpdma_reinit_cond)                   */
+    gBoot.ConnMisc = Rd(REG_CONN_ON_MISC);
+    if ((gBoot.ConnMisc & 3UL) == 3UL) {
+        Reattach();
+        return;
+    }
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    gSeq = 0;
 
     /* patch header (mt76_connac2_patch_hdr, big endian) */
     h = FwPtr(0);
@@ -1584,10 +1644,6 @@ static void FwBoot(void)
         Fwb(FWB_STEP_START, FWB_ERR_BAD_PATCH); return;
     }
 
-    /* firmware already running although we did not start it (only with
-     * FWX_NO_BUS_RESET): do not touch the DMA rings                   */
-    gBoot.ConnMisc = Rd(REG_CONN_ON_MISC);
-    if ((gBoot.ConnMisc & 3UL) == 3UL) { Fwb(FWB_STEP_DONE, FWB_OK); return; }
 
     /* 0. bus master first, like pci_set_master() at the top of
      *    mt7921_pci_probe() (v0.07 did this after the WFSYS reset)   */
