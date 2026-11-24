@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x0012          /* 0.18 */
+#define DRV_VERSION     0x0013          /* 0.19 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -589,7 +589,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.18 - MediaTek MT7921 wireless (phase 4b)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.19 - MediaTek MT7921 wireless (phase 5a)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -1864,6 +1864,9 @@ release:
 #define MCU_EVENT_SCAN_DONE             0x0D
 #define MCU_CE_CMD_SET_CHAN_DOMAIN      0x0F
 #define MCU_EXT_CMD_SET_RX_PATH         0x4E
+#define MCU_UNI_CMD_STA_REC_UPDATE      0x03
+#define MCU_UNI_CMD_ROC                 0x27
+#define MCU_UNI_EVENT_ROC               0x27
 
 /* channel list for SET_CHAN_DOMAIN (country NL): hw_value, flags.
  * flags are mac80211 channel flags: NO_IR = 0x02, RADAR = 0x08      */
@@ -1922,6 +1925,32 @@ static USHORT gNBss;
 static int    gScanReady;                       /* ScanPrep done       */
 static int    gHwBusy;                          /* FwBoot / scan active */
 
+/* ---- phase 5a: authentication test state ------------------------- */
+static MT7921_AUTH gAuth;
+static int    gAuthRun;                         /* record frames to us */
+static UCHAR  gRocToken;
+
+static int IsOurMac(UCHAR FAR *a)
+{
+    USHORT i;
+    for (i = 0; i < 6; i++)
+        if (a[i] != gMac[i]) return 0;
+    return 1;
+}
+
+/* management frame addressed to us (auth, assoc resp, deauth ...) */
+static void OwnFrame(UCHAR FAR *f, USHORT n)
+{
+    if (gAuth.RxFrames < 8)
+        gAuth.Fc[gAuth.RxFrames] = f[0];
+    gAuth.RxFrames++;
+    if (f[0] == 0xB0 && n >= 30) {              /* authentication */
+        gAuth.AuthAlg    = (USHORT)(f[24] | ((USHORT)f[25] << 8));
+        gAuth.AuthSeq    = (USHORT)(f[26] | ((USHORT)f[27] << 8));
+        gAuth.AuthStatus = (USHORT)(f[28] | ((USHORT)f[29] << 8));
+    }
+}
+
 /* RX descriptor of a frame (mt7921_mac_fill_rx): 6 dwords, then the
  * optional groups 4 (16 bytes), 1 (16), 2 (8), 3 (8, RXV with RCPI),
  * 5 (96); then 2 * HDR_OFFSET pad bytes; then the 802.11 header.
@@ -1933,7 +1962,7 @@ static void ParseFrame(UCHAR FAR *b, USHORT len)
     int rssi;
     BSSE *e = 0;
 
-    if (len < 64) return;
+    if (len < 48) return;
     if (g & 0x40) hdr += 16;                    /* group 4 */
     if (g & 0x08) hdr += 16;                    /* group 1 */
     if (g & 0x10) hdr += 8;                     /* group 2 */
@@ -1947,6 +1976,13 @@ static void ParseFrame(UCHAR FAR *b, USHORT len)
         }
     }
     hdr += 2 * (b[9] >> 6);                     /* rxd2 HDR_OFFSET */
+    if (hdr + 24 > len) return;
+
+    /* v0.19: management frames to our own address */
+    if (gAuthRun && (b[hdr] & 0x0C) == 0 && IsOurMac(b + hdr + 4)) {
+        OwnFrame(b + hdr, len - hdr);
+        return;
+    }
     if (hdr + 36 > len) return;
 
     /* beacon (80 00) or probe response (50 00) */
@@ -1998,14 +2034,20 @@ static void ParseFrame(UCHAR FAR *b, USHORT len)
 static void RxBuffer(RING *r, USHORT len)
 {
     UCHAR FAR *ev = RX_BUF_PTR(r, r->tail);
+    UCHAR type = (UCHAR)(ev[3] >> 3);
     if (len > RX_BUF) len = RX_BUF;
-    if ((ev[3] >> 3) == 7 && (ev[2] & 0x0F) == 1) {     /* NORMAL_MCU frame */
+    if (type == 2 || (type == 7 && (ev[2] & 0x0F) == 1)) { /* NORMAL(_MCU) frame */
         if (gScan.Events == 0) {
             gScan.FirstLen = len;
             FarCopy((UCHAR FAR *)gScan.FirstFrame, ev, len < 64 ? len : 64);
         }
         gScan.Events++;
         ParseFrame(ev, len);
+    } else if (gAuthRun && ev[28] == MCU_UNI_EVENT_ROC && len >= 50) {
+        gAuth.RocGranted = 1;                   /* grant tlv at +40   */
+        gAuth.RocStatus  = ev[46];
+        gAuth.RocChannel = ev[47];
+        gAuth.RocBand    = ev[49];
     } else if (ev[28] == MCU_EVENT_SCAN_DONE) {
         gScan.ScanDone = 1;
         FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
@@ -2013,6 +2055,11 @@ static void RxBuffer(RING *r, USHORT len)
         if (gScan.Frames < 8)                   /* reuse: other events */
             gScan.EvtIds[(USHORT)gScan.Frames] = ev[28];
         gScan.Frames++;
+        if (gAuthRun) {
+            if (gAuth.RxOther < 8)
+                gAuth.EvtIds[gAuth.RxOther] = type == 7 ? ev[28] : (UCHAR)(0xF0 | type);
+            gAuth.RxOther++;
+        }
     }
     RxRelease(r);
 }
@@ -2196,6 +2243,256 @@ static void DoScan(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 5a: authentication test (OID_PRIVATE_MT7921_AUTH)             */
+/* Linux order (mac80211 + mt7921): sta_add -> STA_REC_UPDATE for the  */
+/* AP (state NONE), mgd_prepare_tx -> ROC JOIN on the AP channel, then */
+/* the auth frame goes out on the data ring with a connac2 TXD + TXP.  */
+/* ------------------------------------------------------------------ */
+#define OFS_TXF     0x1800      /* TXD + TXP + 802.11 frame (in CMD area) */
+#define AP_WCID     1
+
+static int Aut(USHORT step, USHORT err)
+{
+    gAuth.Step = step;
+    gAuth.Error = err;
+    return err;
+}
+
+static void PutLe16(USHORT at, USHORT v)
+{
+    gPayload[at] = (UCHAR)v;
+    gPayload[at + 1] = (UCHAR)(v >> 8);
+}
+
+/* strongest BSS with the requested SSID */
+static BSSE *AuthPick(void)
+{
+    BSSE *best = 0;
+    USHORT i, k;
+    for (i = 0; i < gNBss; i++) {
+        BSSE *e = &gBss[i];
+        if (e->ssidlen != gAuth.SsidLen) continue;
+        for (k = 0; k < e->ssidlen && e->ssid[k] == gAuth.Ssid[k]; k++) ;
+        if (k != e->ssidlen) continue;
+        if (!best || e->rssi > best->rssi) best = e;
+    }
+    return best;
+}
+
+/* AP advertises WMM (vendor IE 00:50:F2 type 2) */
+static UCHAR HasWmm(BSSE *e)
+{
+    USHORT p;
+    for (p = 0; p + 2 <= e->ielen; p += 2 + e->ies[p + 1]) {
+        UCHAR FAR *ie = (UCHAR FAR *)e->ies + p;
+        if (p + 2 + ie[1] > e->ielen) break;
+        if (ie[0] == 221 && ie[1] >= 5 && ie[2] == 0x00 && ie[3] == 0x50 &&
+            ie[4] == 0xF2 && ie[5] == 2)
+            return 1;
+    }
+    return 0;
+}
+
+/* mt7921_mcu_sta_update(sta = AP, enable, STATE_NONE): sta_req_hdr +
+ * BASIC, PHY, RA, STATE, WTBL{wtbl_req_hdr, GENERIC, RX, HDR_TRANS}  */
+static USHORT StaRec(BSSE *e)
+{
+    USHORT i, p;
+    UCHAR g5 = e->ch > 14;
+
+    PayloadZero(120);
+    gPayload[0] = 0;                            /* bss_idx          */
+    gPayload[1] = AP_WCID;                      /* wlan_idx_lo      */
+    PutLe16(2, 5);                              /* tlv_num          */
+    gPayload[4] = 1;                            /* is_tlv_append    */
+    gPayload[5] = 0;                            /* muar_idx = omac  */
+
+    p = 8;                                      /* STA_REC_BASIC    */
+    PutLe16(p, 0); PutLe16(p + 2, 20);
+    PutLe32(p + 4, 0x00010002UL);               /* CONNECTION_INFRA_AP */
+    gPayload[p + 8] = 2;                        /* CONN_STATE_PORT_SECURE */
+    gPayload[p + 9] = HasWmm(e);                /* qos              */
+    for (i = 0; i < 6; i++) gPayload[p + 12 + i] = e->bssid[i];
+    PutLe16(p + 18, 3);                         /* EXTRA_INFO_VER|NEW */
+
+    p += 20;                                    /* STA_REC_PHY      */
+    PutLe16(p, 0x15); PutLe16(p + 2, 12);
+    PutLe16(p + 4, g5 ? 0x0015 : 0x000F);       /* basic rates      */
+    gPayload[p + 6] = g5 ? 0x08 : 0x03;         /* OFDM | HR_DSSS + ERP */
+
+    p += 12;                                    /* STA_REC_RA       */
+    PutLe16(p, 1); PutLe16(p + 2, 16);
+    PutLe16(p + 4, g5 ? 0x3FC0 : 0x3FCF);       /* legacy OFDM | CCK */
+
+    p += 16;                                    /* STA_REC_STATE    */
+    PutLe16(p, 7); PutLe16(p + 2, 12);          /* state 0 = NONE   */
+
+    p += 12;                                    /* STA_REC_WTBL     */
+    PutLe16(p, 13); PutLe16(p + 2, 52);
+    gPayload[p + 4] = AP_WCID;                  /* wtbl_req_hdr     */
+    gPayload[p + 5] = 1;                        /* WTBL_RESET_AND_SET */
+    PutLe16(p + 6, 3);                          /* nested tlv_num   */
+    p += 12;                                    /* WTBL_GENERIC     */
+    PutLe16(p, 0); PutLe16(p + 2, 20);
+    for (i = 0; i < 6; i++) gPayload[p + 4 + i] = e->bssid[i];
+    gPayload[p + 13] = HasWmm(e);               /* qos              */
+    p += 20;                                    /* WTBL_RX          */
+    PutLe16(p, 1); PutLe16(p + 2, 12);
+    gPayload[p + 5] = 1; gPayload[p + 6] = 1; gPayload[p + 7] = 1;
+    p += 12;                                    /* WTBL_HDR_TRANS   */
+    PutLe16(p, 6); PutLe16(p + 2, 8);
+    gPayload[p + 4] = 1;                        /* to_ds            */
+    gPayload[p + 6] = 1;                        /* no_rx_trans      */
+    p += 8;                                     /* = 120            */
+
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_STA_REC_UPDATE, p, 1);
+}
+
+/* UNI ROC acquire (JOIN) / abort */
+static USHORT RocCmd(UCHAR acquire, UCHAR ch, USHORT ms)
+{
+    PayloadZero(28);
+    if (acquire) {
+        PutLe16(4, 0); PutLe16(6, 24);          /* UNI_ROC_ACQUIRE  */
+        gPayload[9]  = gRocToken;
+        gPayload[10] = ch;                      /* control channel  */
+        gPayload[12] = ch > 14 ? 2 : 1;         /* band             */
+        gPayload[14] = ch;                      /* center_chan      */
+        gPayload[17] = ch;                      /* center_chan_from_ap */
+        gPayload[19] = 0;                       /* MT7921_ROC_REQ_JOIN */
+        PutLe32(20, ms);
+        gPayload[24] = 0xFF;                    /* dbdcband auto    */
+        gKind = MK_UNI;
+        return McuSend(MCU_UNI_CMD_ROC, 28, 0);
+    }
+    PutLe16(4, 1); PutLe16(6, 12);              /* UNI_ROC_ABORT    */
+    gPayload[9]  = gRocToken;
+    gPayload[10] = 0xFF;
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_ROC, 16, 0);
+}
+
+static void PutFarLe32(UCHAR FAR *b, ULONG v)
+{
+    union { ULONG l; UCHAR c[4]; } u;
+    u.l = v;
+    b[0] = u.c[0]; b[1] = u.c[1]; b[2] = u.c[2]; b[3] = u.c[3];
+}
+
+/* connac2 TXD (32) + hw TXP (32) + frame, queued on TX ring 0 */
+static int TxMgmt(const UCHAR *f, USHORT n, UCHAR ch)
+{
+    UCHAR FAR *b = (UCHAR FAR *)MkFar(gDmaSel, OFS_TXF);
+    UCHAR stype = (UCHAR)(f[0] >> 4);
+    USHORT i;
+
+    FarZero(b, 64);
+    /* dw0: TX_BYTES, PKT_FMT CT (0), Q_IDX ALTX0 (0x10) */
+    PutFarLe32(b + 0,  (ULONG)(n + 32) | 0x20000000UL);
+    /* dw1: LONG_FORMAT, HDR_FORMAT 802.11, HDR_INFO 24/2, WLAN_IDX */
+    PutFarLe32(b + 4,  0x80020000UL | (12UL << 11) | AP_WCID);
+    /* dw2: FIX_RATE, HTC_VLD, frame type mgmt, sub type */
+    PutFarLe32(b + 8,  0x80002000UL | stype);
+    /* dw3: BA_DISABLE, REM_TX_COUNT 15 */
+    PutFarLe32(b + 12, 0x10000000UL | (15UL << 11));
+    /* dw6: FIXED_BW, rate CCK 1M (2.4 GHz) or OFDM 6M (5 GHz) */
+    PutFarLe32(b + 24, 0x00000004UL | ((ch > 14 ? 0x4BUL : 0x00UL) << 16));
+    /* dw7: SPE_IDX 24, sub type, type mgmt */
+    PutFarLe32(b + 28, (24UL << 11) | ((ULONG)stype << 16));
+    /* hw TXP: msdu_id[0] = token 1 | VALID, ptr[0] = frame, LAST */
+    b[32] = 0x01; b[33] = 0x80;
+    PutFarLe32(b + 40, gDmaPhys + OFS_TXF + 64);
+    b[44] = (UCHAR)n; b[45] = (UCHAR)(0x80 | (n >> 8));
+    for (i = 0; i < n; i++) b[64 + i] = f[i];
+
+    return TxSend(&rTx0, gDmaPhys + OFS_TXF, 64);
+}
+
+static void DoAuth(void)
+{
+    static UCHAR fr[30];
+    BSSE *e;
+    USHORT st, t, i;
+
+    gAuth.Magic = MT7921_AUTH_MAGIC;
+    gAuth.AuthStatus = 0xFFFF;
+    gAuth.StSta = gAuth.StRoc = 0xFFFF;
+    gAuth.StaUni = 0xFFFFFFFFUL;
+    Aut(AUT_STEP_START, AUT_OK);
+
+    /* 1. scan when the table has no match yet */
+    e = AuthPick();
+    if (!e) {
+        DoScan();
+        if (!gFwRunning) { Aut(AUT_STEP_SCAN, AUT_ERR_NO_FW); return; }
+        e = AuthPick();
+    }
+    if (!e) { Aut(AUT_STEP_SCAN, AUT_ERR_NO_BSS); return; }
+    for (i = 0; i < 6; i++) gAuth.Bssid[i] = e->bssid[i];
+    gAuth.Channel = e->ch;
+    gAuth.Rssi = e->rssi;
+
+    gAuthRun = 1;
+    RxDrain();
+
+    /* 2. STA record for the AP */
+    st = StaRec(e);
+    gAuth.StSta = st;
+    if (st >= 0xFFFE) { gAuthRun = 0; Aut(AUT_STEP_STA_REC, st == 0xFFFE ? AUT_ERR_TX : AUT_ERR_NO_EVENT); return; }
+    gAuth.StaUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+
+    /* 3. ROC JOIN, wait up to ~1 s for the grant */
+    gRocToken++;
+    st = RocCmd(1, e->ch, 1500);
+    gAuth.StRoc = st;
+    if (st >= 0xFFFE) { gAuthRun = 0; Aut(AUT_STEP_ROC, AUT_ERR_TX); return; }
+    for (t = 0; t < 60 && !gAuth.RocGranted; t++) {
+        RxDrain();
+        if (gAuth.RocGranted) break;
+        DH_Sleep(16);
+    }
+    if (!gAuth.RocGranted) {
+        RocCmd(0, 0, 0);
+        gAuthRun = 0;
+        Aut(AUT_STEP_ROC, AUT_ERR_NO_GRANT);
+        return;
+    }
+
+    /* 4. Open System authentication, transaction 1 */
+    for (i = 0; i < 30; i++) fr[i] = 0;
+    fr[0] = 0xB0;
+    for (i = 0; i < 6; i++) {
+        fr[4 + i]  = e->bssid[i];               /* addr1 = AP       */
+        fr[10 + i] = gMac[i];                   /* addr2 = us       */
+        fr[16 + i] = e->bssid[i];               /* addr3 = BSSID    */
+    }
+    fr[26] = 1;                                 /* transaction seq 1 */
+    if (TxMgmt(fr, 30, e->ch)) {
+        RocCmd(0, 0, 0);
+        gAuthRun = 0;
+        Aut(AUT_STEP_TX, AUT_ERR_TX);
+        return;
+    }
+    gAuth.TxDone = 1;
+
+    /* 5. wait up to ~1 s for the answer */
+    for (t = 0; t < 60 && gAuth.AuthStatus == 0xFFFF; t++) {
+        RxDrain();
+        if (gAuth.AuthStatus != 0xFFFF) break;
+        DH_Sleep(16);
+    }
+    gAuth.Polls = t;
+    RocCmd(0, 0, 0);
+    RxDrain();
+    gAuthRun = 0;
+
+    if (gAuth.AuthStatus == 0xFFFF) { Aut(AUT_STEP_WAIT, AUT_ERR_NO_RESP); return; }
+    if (gAuth.AuthStatus != 0)      { Aut(AUT_STEP_WAIT, AUT_ERR_STATUS); return; }
+    Aut(AUT_STEP_DONE, AUT_OK);
+}
+
 /* ---- OID_802_11_BSSID_LIST: NDIS_802_11_BSSID_LIST_EX --------------- */
 /* NDIS_WLAN_BSSID_EX as driver_genmac.c sees it (116 bytes + IEs):
  *   0 Length, 4 MacAddress[6], 10 Reserved[2], 12 Ssid{len, [32]},
@@ -2293,6 +2590,33 @@ static ULONG GetU32(UCHAR FAR *data, ULONG len, ULONG *dst, ULONG *done)
     return NDIS_STATUS_SUCCESS;
 }
 
+/* NDIS_802_11_CAPABILITY v2: Length, Version, NoOfPMKIDs, NoOfPairs,
+ * then { AuthMode, EncryptStatus } pairs                             */
+static const UCHAR gCapPairs[] = {
+    0, 1,       /* Open    / Disabled              */
+    7, 6,       /* WPA2PSK / Encryption3 (CCMP)    */
+    4, 6,       /* WPAPSK  / Encryption3           */
+    7, 4,       /* WPA2PSK / Encryption2 (TKIP)    */
+    4, 4        /* WPAPSK  / Encryption2           */
+};
+
+static ULONG PutCapability(UCHAR FAR *data, ULONG len, ULONG *done)
+{
+    USHORT n = sizeof(gCapPairs) / 2, need = 16 + n * 8, i;
+    if (len < need) { *done = need; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+    FarZero(data, need);
+    FarLe32(data, need);
+    FarLe32(data + 4, 2);
+    FarLe32(data + 8, 0);                       /* no PMKID cache yet */
+    FarLe32(data + 12, n);
+    for (i = 0; i < n; i++) {
+        data[16 + i * 8] = gCapPairs[i * 2];
+        data[20 + i * 8] = gCapPairs[i * 2 + 1];
+    }
+    *done = need;
+    return NDIS_STATUS_SUCCESS;
+}
+
 static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
 {
     *done = 0;
@@ -2327,12 +2651,37 @@ static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
         HwProbe();
         return PutBytes(data, len, (UCHAR FAR *)&gProbe, sizeof(gProbe), done);
 
+    case OID_PRIVATE_MT7921_AUTH:
+        if (len < sizeof(gAuth)) { *done = sizeof(gAuth); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        {
+            MT7921_AUTH FAR *in = (MT7921_AUTH FAR *)data;
+            USHORT k;
+            FarZero((UCHAR FAR *)&gAuth, sizeof(gAuth));
+            gAuth.SsidLen = in->SsidLen > 32 ? 32 : in->SsidLen;
+            for (k = 0; k < 32; k++) gAuth.Ssid[k] = in->Ssid[k];
+        }
+        gHwBusy = 1;
+        DoAuth();
+        gHwBusy = 0;
+        return PutBytes(data, len, (UCHAR FAR *)&gAuth, sizeof(gAuth), done);
+
     case OID_802_3_CURRENT_ADDRESS:
+        /* v0.19: the real MAC is known only once the firmware runs */
+        if (!gFwRunning && !gHwBusy) {
+            gHwBusy = 1;
+            gFwx = 0;
+            FwBoot();
+            gHwBusy = 0;
+        }
         return PutBytes(data, len, (UCHAR FAR *)gMac, 6, done);
+    case OID_802_11_CAPABILITY:                 /* v0.19 */
+        return PutCapability(data, len, done);
     case OID_802_11_AUTHENTICATION_MODE:
         return PutU32(data, len, gAuthMode, done);
-    case OID_802_11_ENCRYPTION_STATUS:
-        return PutU32(data, len, gEncStatus, done);
+    case OID_802_11_ENCRYPTION_STATUS:         /* no key yet: KeyAbsent */
+        return PutU32(data, len, gEncStatus == 0 ? 2 : gEncStatus == 4 ? 5 :
+                      gEncStatus == 6 ? 7 : gEncStatus, done);
     case OID_802_11_INFRASTRUCTURE_MODE:
         return PutU32(data, len, gInfraMode, done);
     case OID_802_11_SSID:                       /* not associated: empty */

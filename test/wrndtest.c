@@ -8,6 +8,7 @@
  *   /x:N experiment flags for /fw (hex, see FWX_ in wrnd_ioctl.h)
  *   /scan  diagnostic scan (loads the firmware if needed)
  *   /list  like wpa_supplicant: OID BSSID_LIST_SCAN, then BSSID_LIST
+ *   /auth:SSID  phase 5a: one Open System authentication with that AP
  */
 #define INCL_DOS
 #define INCL_DOSDEVIOCTL
@@ -424,8 +425,57 @@ static void show_u32(const char *name, ULONG oid)
            name, rc, st, done, v, v);
 }
 
+static void do_auth(const char *ssid)
+{
+    static MT7921_AUTH a;
+    static const char *stp[] = { "start", "scan / pick BSS", "STA_REC_UPDATE",
+        "ROC (channel)", "send auth frame", "wait for answer", "done" };
+    static const char *err[] = { "OK", "firmware not running",
+        "SSID not found in the scan", "not taken by DMA", "no answer",
+        "error status", "no ROC grant event", "no authentication response" };
+    ULONG st, done;
+    int rc, i, n;
+
+    memset(&a, 0, sizeof(a));
+    n = strlen(ssid);
+    if (n > 32) n = 32;
+    a.SsidLen = (unsigned char)n;
+    memcpy(a.Ssid, ssid, n);
+    printf("\nAuthentication test with '%s' (may scan first, ~10 s) ...\n", ssid);
+    rc = oid_req(0, OID_PRIVATE_MT7921_AUTH, &a, sizeof(a), &st, &done);
+    printf("Auth: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st || a.Magic != MT7921_AUTH_MAGIC) {
+        printf("  driver does not support /auth (old MT7921.OS2?)\n");
+        return;
+    }
+    printf("  result          %s at step %u (%s)\n",
+           a.Error < 8 ? err[a.Error] : "?", a.Step, a.Step < 7 ? stp[a.Step] : "?");
+    printf("  AP              %02X:%02X:%02X:%02X:%02X:%02X  channel %u  %d dBm\n",
+           a.Bssid[0], a.Bssid[1], a.Bssid[2], a.Bssid[3], a.Bssid[4], a.Bssid[5],
+           a.Channel, a.Rssi);
+    if (a.StSta == 0xFFFF)
+        printf("  STA_REC         -\n");
+    else
+        printf("  STA_REC         status %04X, UNI %08lX (0 = OK)\n", a.StSta, a.StaUni);
+    printf("  ROC             %s, grant %s (status %u, channel %u, band %u)\n",
+           a.StRoc == 0 ? "sent" : a.StRoc == 0xFFFE ? "TX timeout" : "-",
+           a.RocGranted ? "yes" : "NO", a.RocStatus, a.RocChannel, a.RocBand);
+    printf("  auth frame      %s\n", a.TxDone ? "taken by DMA" : "not sent");
+    if (a.AuthStatus == 0xFFFF)
+        printf("  response        none\n");
+    else
+        printf("  response        alg %u, seq %u, status %u%s\n", a.AuthAlg,
+               a.AuthSeq, a.AuthStatus, a.AuthStatus == 0 ? "  => AUTHENTICATED" : "");
+    printf("  frames to us    %u:", a.RxFrames);
+    for (i = 0; i < 8 && i < a.RxFrames; i++) printf(" %02X", a.Fc[i]);
+    printf("\n  other RX        %u:", a.RxOther);
+    for (i = 0; i < 8 && i < a.RxOther; i++) printf(" %02X", a.EvtIds[i]);
+    printf("\n  waited          %lu x 16 ms\n", a.Polls);
+}
+
 int main(int argc, char **argv)
 {
+    const char *auth_ssid = NULL;
     const char *dev = "WRND32$";
     int do_hw = 0, do_fw = 0, do_sc = 0, do_li = 0, i;
     ULONG action, st, done;
@@ -442,6 +492,8 @@ int main(int argc, char **argv)
             do_sc = 1;
         else if (!stricmp(argv[i], "/list") || !stricmp(argv[i], "-list"))
             do_li = 1;
+        else if (!strnicmp(argv[i], "/auth:", 6))
+            auth_ssid = argv[i] + 6;
         else if (!strnicmp(argv[i], "/x:", 3))
             fwx_flags = (unsigned)strtoul(argv[i] + 3, NULL, 16);
         else
@@ -499,6 +551,8 @@ int main(int argc, char **argv)
         do_scan();
     if (do_li)
         do_list();
+    if (auth_ssid)
+        do_auth(auth_ssid);
 
     DosClose(hDev);
     return 0;

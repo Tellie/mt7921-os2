@@ -108,5 +108,14 @@ wpa_supplicant -i lan1 -c wpa.conf -dd
 ```
 
 `wrndtest` must report ISWIRELESS=1, version 0x00010008 and the PCI data.
-wpa_supplicant should find `lan1`, initialise and start scanning
-(with 0 results – there is no radio yet).
+Since v0.18 wpa_supplicant accepts `lan1`, scans and lists the networks
+with signal strength and RSN data. Connecting does not work yet (phase 5).
+
+Phase 5a authentication test (one Open System auth frame, no association):
+
+```
+wrndtest /auth:MyNetwork
+```
+
+Expected: `ROC ... grant yes`, `auth frame taken by DMA` and
+`response alg 0, seq 2, status 0 => AUTHENTICATED`.

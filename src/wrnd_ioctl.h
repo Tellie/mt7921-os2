@@ -400,6 +400,63 @@ typedef struct _MT7921_SCAN {       /* 824 bytes */
 } MT7921_SCAN;
 #pragma pack()
 
+/* ---- Phase 5a: authentication test (OID_PRIVATE_MT7921_AUTH) ----- */
+/* GET with a MT7921_AUTH buffer; the caller puts the SSID in Ssid /
+ * SsidLen. The driver scans if needed, takes the strongest BSS with
+ * that SSID, adds a STA record for it, asks the firmware for the
+ * channel (ROC JOIN), sends one Open System authentication frame and
+ * waits up to 1 s for the answer. No association yet.               */
+#define OID_PRIVATE_MT7921_AUTH        0xFFFFFF84UL
+#define MT7921_AUTH_MAGIC              0x48545541UL     /* "AUTH" */
+
+#define AUT_STEP_START      0
+#define AUT_STEP_SCAN       1       /* scan / pick BSS                */
+#define AUT_STEP_STA_REC    2       /* UNI STA_REC_UPDATE (AP, wcid 1) */
+#define AUT_STEP_ROC        3       /* UNI ROC acquire + grant event  */
+#define AUT_STEP_TX         4       /* auth frame on TX ring 0        */
+#define AUT_STEP_WAIT       5       /* auth response                  */
+#define AUT_STEP_DONE       6
+
+#define AUT_OK              0
+#define AUT_ERR_NO_FW       1
+#define AUT_ERR_NO_BSS      2       /* SSID not in the scan results   */
+#define AUT_ERR_TX          3       /* command/frame not taken by DMA */
+#define AUT_ERR_NO_EVENT    4       /* no answer                      */
+#define AUT_ERR_STATUS      5       /* firmware/AP returned an error  */
+#define AUT_ERR_NO_GRANT    6       /* no ROC grant event             */
+#define AUT_ERR_NO_RESP     7       /* no authentication response     */
+
+#pragma pack(1)
+typedef struct _MT7921_AUTH {       /* 128 bytes */
+    unsigned long  Magic;
+    unsigned short Step;
+    unsigned short Error;
+    unsigned char  SsidLen;         /* in */
+    char           Ssid[32];        /* in */
+    unsigned char  Bssid[6];        /* chosen BSS                     */
+    unsigned char  Channel;
+    signed char    Rssi;
+    unsigned long  StaUni;          /* STA_REC_UPDATE status (0 = OK) */
+    unsigned short StSta;           /* status byte, FFFF none, FFFE TX */
+    unsigned short StRoc;           /* 0 = taken by DMA               */
+    unsigned char  RocGranted;      /* 1 = ROC grant event seen       */
+    unsigned char  RocStatus;       /* grant: status                  */
+    unsigned char  RocChannel;      /* grant: primary channel         */
+    unsigned char  RocBand;         /* grant: 1 = 2.4 GHz, 2 = 5 GHz  */
+    unsigned short TxDone;          /* 1 = frame taken by DMA         */
+    unsigned short AuthSeq;         /* response: transaction seq      */
+    unsigned short AuthStatus;      /* response: status, FFFF = none  */
+    unsigned short AuthAlg;
+    unsigned short RxFrames;        /* frames to our MAC              */
+    unsigned short RxOther;         /* other RX buffers drained       */
+    unsigned char  Fc[8];           /* first byte of the first frames
+                                       to us (B0 auth, C0 deauth ..)  */
+    unsigned char  EvtIds[8];       /* eid of MCU events while waiting */
+    unsigned long  Polls;
+    unsigned char  Rsv[35];
+} MT7921_AUTH;
+#pragma pack()
+
 /* order of MT7921_FWBOOT.Dump[] */
 #define DUMP_LPCTL          0   /* 0x7C060010 CONN_ON_LPCTL          */
 #define DUMP_CONN_MISC      1   /* 0x7C0600F0 CONN_ON_MISC           */
