@@ -1,0 +1,12 @@
+# wlink directives for MT7921.OS2 (16-bit NE physical device driver)
+format os2 dll
+name mt7921.os2
+option quiet, map=mt7921.map, nodefaultlibs
+option description 'MT7921.OS2 MediaTek MT7921 wireless driver (phase 1)'
+file header.obj
+file mt7921.obj
+library os2.lib
+# Data first (device header at DS:0), then code.
+order clname DATA segment _HEADER segment CONST segment CONST2 segment _DATA
+      clname BSS  segment _BSS segment ENDDATA
+      clname CODE segment _TEXT segment ENDCODE

@@ -1,0 +1,11 @@
+# build output
+out/
+*.obj
+*.o
+*.os2
+*.map
+*.exe
+*.err
+build.log
+# firmware is distributed separately (see README)
+*.bin
