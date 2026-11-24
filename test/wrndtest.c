@@ -383,6 +383,39 @@ static void do_list(void)
     }
 }
 
+/* IsWireless() from wpa_supplicant-os2 packet32.c, call for call: one
+ * parameter block reused for ISWIRELESS, GENMAC_VERSION, LANNUMBER   */
+static void wpa_iswireless(void)
+{
+    ULONG Paras[10], ParmInOut, DataInOut, Dummy = 0;
+    APIRET rc;
+
+    memset(Paras, 0, sizeof(Paras));
+    ParmInOut = 10 * 4;
+    DataInOut = 4;
+    Paras[1] = 4;
+    Paras[0] = OID_PRIVATE_WRAPPER_ISWIRELESS;
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  ISWIRELESS      rc=%lu value=%lu\n", rc, Dummy);
+    if (rc || !Dummy) { printf("  => wpa_supplicant would skip this adapter\n"); return; }
+
+    Paras[0] = OID_PRIVATE_WRAPPER_GENMAC_VERSION;          /* Paras[1] not reset! */
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  GENMAC_VERSION  rc=%lu value=%08lX\n", rc, Dummy);
+    if (rc || Dummy < WRND_MIN_VERSION) {
+        printf("  => wpa_supplicant: \"cannot find Genmac V1.08 or better\"\n");
+        return;
+    }
+
+    Paras[0] = OID_PRIVATE_WRAPPER_LANNUMBER;
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  LANNUMBER       rc=%lu value=%lu\n", rc, Dummy);
+    printf("  => wpa_supplicant will accept this adapter as lan%lu\n", Dummy);
+}
+
 static void show_u32(const char *name, ULONG oid)
 {
     ULONG v = 0, st, done;
@@ -422,7 +455,9 @@ int main(int argc, char **argv)
         printf("DosOpen(%s) failed, rc=%lu - is MT7921.OS2 loaded?\n", dev, rc);
         return 1;
     }
-    printf("%s opened\n\nwpa_supplicant probe OIDs:\n", dev);
+    printf("%s opened\n\nwpa_supplicant IsWireless() sequence:\n", dev);
+    wpa_iswireless();
+    printf("\nwpa_supplicant probe OIDs:\n");
 
     show_u32("ISWIRELESS (must be !=0)",   OID_PRIVATE_WRAPPER_ISWIRELESS);
     show_u32("GENMAC_VERSION (>=1.08)",    OID_PRIVATE_WRAPPER_GENMAC_VERSION);

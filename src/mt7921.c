@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x0011          /* 0.17 */
+#define DRV_VERSION     0x0012          /* 0.18 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -589,7 +589,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.17 - MediaTek MT7921 wireless (phase 4b)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.18 - MediaTek MT7921 wireless (phase 4b)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -2414,6 +2414,13 @@ static USHORT DoIoctl(RP_IOCTL FAR *rp)
 
     oid = parm[0];
     len = parm[1];
+    /* v0.18: wpa_supplicant's IsWireless() reuses the parameter block
+     * for three requests in a row, so parm[1] then holds the status of
+     * the previous call (0), not a length. Use the larger of parm[1]
+     * and the real IOCtl data length (RX passes DataLen 4 with
+     * parm[1] = 2000, so parm[1] alone is needed there too).         */
+    if ((ULONG)rp->DataLen > len)
+        len = rp->DataLen;
     if (len > WRND_MAX_DATA)
         len = WRND_MAX_DATA;
 
