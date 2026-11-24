@@ -265,6 +265,7 @@ static void do_scan(void)
 {
     static MT7921_SCAN s;
     static const char *stp[] = { "start", "EFUSE_BUFFER_MODE", "MAC_INIT_CTRL",
+        "SET_CHAN_DOMAIN", "SET_RX_PATH",
         "DEV_INFO_UPDATE", "BSS_INFO_UPDATE", "START_HW_SCAN",
         "collect beacons", "done" };
     static const char *err[] = { "OK", "firmware not running - run /fw first",
@@ -282,9 +283,12 @@ static void do_scan(void)
         return;
     }
     printf("  result          %s at step %u (%s)\n",
-           s.Error < 6 ? err[s.Error] : "?", s.Step, s.Step < 8 ? stp[s.Step] : "?");
+           s.Error < 6 ? err[s.Error] : "?", s.Step, s.Step < 10 ? stp[s.Step] : "?");
     scan_print_st("EFUSE mode", s.StEfuse);
     scan_print_st("MAC enable", s.StMacEn);
+    printf("  CHAN_DOMAIN     %s\n", s.StChanDom == 0 ? "sent (NL, 13 + 19 channels)" :
+           s.StChanDom == 0xFFFE ? "not sent (TX timeout)" : "-");
+    scan_print_st("RX path", s.StRxPath);
     printf("  DEV_INFO        UNI status %08lX (0 = OK)\n", s.DevUni);
     printf("  BSS_INFO        UNI status %08lX (0 = OK)\n", s.BssUni);
     printf("  HW_SCAN         %s\n", s.StScan == 0 ? "sent" :
@@ -292,6 +296,18 @@ static void do_scan(void)
     printf("  RX frames       %lu, beacons/probe responses %lu, other events %lu\n",
            s.Frames, s.Beacons, s.Events);
     printf("  SCAN_DONE       %s after %lu polls\n", s.ScanDone ? "yes" : "NO", s.Polls);
+    if (s.ScanDone)
+        printf("                  seq %u, channels scanned %u, state %u, beacons %lu, country %.3s\n",
+               s.DoneEvt[0], s.DoneEvt[4], s.DoneEvt[5],
+               (ULONG)s.DoneEvt[8] | ((ULONG)s.DoneEvt[9] << 8) |
+               ((ULONG)s.DoneEvt[10] << 16) | ((ULONG)s.DoneEvt[11] << 24),
+               (char *)&s.DoneEvt[20]);
+    if (s.Events) {
+        printf("  other event ids");
+        for (i = 0; i < 8 && i < (int)s.Events; i++)
+            printf(" %02X", s.EvtIds[i]);
+        printf("\n");
+    }
     if (s.FirstLen) {
         printf("  first RX frame  %u bytes:", s.FirstLen);
         for (i = 0; i < 64 && i < s.FirstLen; i++)

@@ -342,11 +342,13 @@ typedef struct _MT7921_FWBOOT {     /* 328 bytes */
 #define SCN_STEP_START      0
 #define SCN_STEP_EFUSE      1       /* EXT EFUSE_BUFFER_MODE          */
 #define SCN_STEP_MAC_EN     2       /* EXT MAC_INIT_CTRL              */
-#define SCN_STEP_DEV_INFO   3       /* UNI DEV_INFO_UPDATE            */
-#define SCN_STEP_BSS_INFO   4       /* UNI BSS_INFO_UPDATE            */
-#define SCN_STEP_HW_SCAN    5       /* CE START_HW_SCAN               */
-#define SCN_STEP_COLLECT    6       /* beacons until SCAN_DONE        */
-#define SCN_STEP_DONE       7
+#define SCN_STEP_CHAN_DOM   3       /* CE SET_CHAN_DOMAIN (v0.15)     */
+#define SCN_STEP_RX_PATH    4       /* EXT SET_RX_PATH    (v0.15)     */
+#define SCN_STEP_DEV_INFO   5       /* UNI DEV_INFO_UPDATE            */
+#define SCN_STEP_BSS_INFO   6       /* UNI BSS_INFO_UPDATE            */
+#define SCN_STEP_HW_SCAN    7       /* CE START_HW_SCAN               */
+#define SCN_STEP_COLLECT    8       /* beacons until SCAN_DONE        */
+#define SCN_STEP_DONE       9
 
 #define SCN_OK              0
 #define SCN_ERR_NO_FW       1       /* run /fw first                  */
@@ -365,7 +367,7 @@ typedef struct _MT7921_BSS {        /* 40 bytes */
     char           Ssid[32];
 } MT7921_BSS;
 
-typedef struct _MT7921_SCAN {       /* 748 bytes */
+typedef struct _MT7921_SCAN {       /* 808 bytes */
     unsigned long  Magic;
     unsigned short Step;
     unsigned short Error;
@@ -383,6 +385,14 @@ typedef struct _MT7921_SCAN {       /* 748 bytes */
     unsigned short FirstLen;        /* length of the first RX2 frame  */
     unsigned char  FirstFrame[64];  /* its first 64 bytes (RXD layout) */
     MT7921_BSS     Bss[SCAN_MAX_BSS];
+    /* v0.15 */
+    unsigned short StChanDom;       /* 0 = taken by DMA (no answer)   */
+    unsigned short StRxPath;        /* status byte, FFFF none         */
+    unsigned char  DoneEvt[48];     /* SCAN_DONE payload (after RXD):
+                                       [0] seq, [4] complete_channel_num,
+                                       [5] current_state, [8..11]
+                                       beacon_scan_num, [20..22] alpha2 */
+    unsigned char  EvtIds[8];       /* eid of the first other events  */
 } MT7921_SCAN;
 #pragma pack()
 

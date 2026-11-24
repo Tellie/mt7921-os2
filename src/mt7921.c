@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x000E          /* 0.14 */
+#define DRV_VERSION     0x000F          /* 0.15 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -570,7 +570,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.14 - MediaTek MT7921 wireless (phase 4a)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.15 - MediaTek MT7921 wireless (phase 4a)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -1834,6 +1834,14 @@ release:
 #define MCU_UNI_CMD_BSS_INFO_UPDATE     0x02
 #define MCU_CE_CMD_START_HW_SCAN        0x03
 #define MCU_EVENT_SCAN_DONE             0x0D
+#define MCU_CE_CMD_SET_CHAN_DOMAIN      0x0F
+#define MCU_EXT_CMD_SET_RX_PATH         0x4E
+
+/* channel list for SET_CHAN_DOMAIN (country NL): hw_value, flags.
+ * flags are mac80211 channel flags: NO_IR = 0x02, RADAR = 0x08      */
+static const UCHAR gCh2g[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13 };
+static const UCHAR gCh5g[] = { 36,40,44,48, 52,56,60,64,
+                               100,104,108,112,116,120,124,128,132,136,140 };
 
 #define SCAN_LIMIT      8000000UL       /* polls, roughly 8+ seconds */
 
@@ -1939,10 +1947,14 @@ static void ScanCollect(void)
             c.l = DmaRd(r->desc + r->tail * 16 + 4);
             if (c.w.hi & DESC_DMA_DONE_HI) {
                 UCHAR FAR *ev = (UCHAR FAR *)MkFar(gDmaSel, r->bufs + r->tail * RX_BUF);
-                if (ev[28] == MCU_EVENT_SCAN_DONE)
+                if (ev[28] == MCU_EVENT_SCAN_DONE) {
                     gScan.ScanDone = 1;
-                else
+                    FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
+                } else {
+                    if (gScan.Events < 8)
+                        gScan.EvtIds[(USHORT)gScan.Events] = ev[28];
                     gScan.Events++;
+                }
                 RxRelease(r);
             }
         }
@@ -1959,6 +1971,7 @@ static void DoScan(void)
     FarZero((UCHAR FAR *)&gScan, sizeof(gScan));
     gScan.Magic = MT7921_SCAN_MAGIC;
     gScan.StEfuse = gScan.StMacEn = gScan.StScan = 0xFFFF;
+    gScan.StChanDom = gScan.StRxPath = 0xFFFF;
     gScan.DevUni = gScan.BssUni = 0xFFFFFFFFUL;
 
     if (!gFwRunning) { Scn(SCN_STEP_START, SCN_ERR_NO_FW); return; }
@@ -1979,6 +1992,44 @@ static void DoScan(void)
     st = McuSend(0xED, 4, 1);
     gScan.StMacEn = st;
     if (st >= 0xFFFE) { Scn(SCN_STEP_MAC_EN, ScnErr(st)); return; }
+
+    /* 2a. mt76_connac_mcu_set_channel_domain: hdr { alpha2[4], bw_2g 0,
+     *     bw_5g 3, bw_6g 3, pad, n_2ch, n_5ch, n_6ch, pad2 } then
+     *     { le16 hw_value, le16 pad, le32 flags } per channel; no answer */
+    {
+        USHORT p = 12, k;
+        PayloadZero(12 + (sizeof(gCh2g) + sizeof(gCh5g)) * 8);
+        gPayload[0] = 'N'; gPayload[1] = 'L';
+        gPayload[4] = 0;                        /* bw_2g 20/40          */
+        gPayload[5] = 3;                        /* bw_5g up to 160      */
+        gPayload[6] = 3;
+        gPayload[8] = sizeof(gCh2g);
+        gPayload[9] = sizeof(gCh5g);
+        for (k = 0; k < sizeof(gCh2g); k++, p += 8)
+            gPayload[p] = gCh2g[k];
+        for (k = 0; k < sizeof(gCh5g); k++, p += 8) {
+            gPayload[p] = gCh5g[k];
+            if (gCh5g[k] >= 52)                 /* DFS: passive + radar */
+                gPayload[p + 4] = 0x0A;
+        }
+        gSetQuery = MCU_Q_SET;
+        st = McuSend(MCU_CE_CMD_SET_CHAN_DOMAIN, p, 0);
+        gScan.StChanDom = st;
+        if (st >= 0xFFFE) { Scn(SCN_STEP_CHAN_DOM, SCN_ERR_TX); return; }
+    }
+
+    /* 2b. mt7921_mcu_set_chan_info(SET_RX_PATH): channel 1, 20 MHz,
+     *     2 TX streams, RX mask 3, normal switch, band 0, 2.4 GHz     */
+    PayloadZero(76);
+    gPayload[0] = 1;                            /* control_ch          */
+    gPayload[1] = 1;                            /* center_ch           */
+    gPayload[2] = 0;                            /* bw 20 MHz           */
+    gPayload[3] = 2;                            /* tx_streams_num      */
+    gPayload[4] = 3;                            /* rx_streams (mask)   */
+    gKind = MK_EXT; gExtCid = MCU_EXT_CMD_SET_RX_PATH;
+    st = McuSend(0xED, 76, 1);
+    gScan.StRxPath = st;
+    if (st >= 0xFFFE) { Scn(SCN_STEP_RX_PATH, ScnErr(st)); return; }
 
     /* 3. uni_add_dev: DEV_INFO_UPDATE { omac 0, band 0, pad;
      *    tlv: tag 0 ACTIVE, len 12, active 1, link 0, omac_addr }    */

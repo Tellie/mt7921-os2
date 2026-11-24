@@ -16,7 +16,7 @@ can drive it without changes. See `src/wrnd_ioctl.h` for the interface.
 | 3a | ROM patch from disk, bus master, WFDMA rings, MCU messages, ROM patch download | done (v0.10) |
 | 3b | RAM code download, FW_START, N9 ready | done (v0.11) |
 | 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | done (v0.13) |
-| 4a | EFUSE mode, MAC enable, station interface (DEV/BSS info), HW scan, beacon list | **this version (v0.14)** |
+| 4a | EFUSE mode, MAC enable, channel domain, RX path, station interface, HW scan, beacon list | **this version (v0.15)** |
 | 4b | Scan results as OID_802_11_BSSID_LIST for wpa_supplicant | |
 | 4 | MCU commands: read MAC from EEPROM, hw_scan → `BSSID_LIST` | |
 | 5 | Mini-MLME: auth/assoc, EAPOL via 802_1X_RX/TX, keys via ADD_KEY | |
@@ -88,7 +88,7 @@ v0.13 `/fw` then reuses it and only sets up the host DMA again. First scan (afte
 wrndtest /scan
 ```
 
-Expected: `OK at step 7 (done)` and a list of nearby networks.
+Expected: `OK at step 9 (done)` and a list of nearby networks.
 
 Expected for `/fw`: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
 (sem get 1 = the patch was already loaded). The WFSYS reset is off by
