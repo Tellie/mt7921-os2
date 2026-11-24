@@ -15,8 +15,9 @@ can drive it without changes. See `src/wrnd_ioctl.h` for the interface.
 | 2 | Enable PCI memory, map BAR0, fw/driver-own handshake, read chip ID | done (v0.04) |
 | 3a | ROM patch from disk, bus master, WFDMA rings, MCU messages, ROM patch download | done (v0.10) |
 | 3b | RAM code download, FW_START, N9 ready | done (v0.11) |
-| 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | **this version (v0.13)** |
-| 3d | IRQ handler instead of polling | |
+| 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | done (v0.13) |
+| 4a | EFUSE mode, MAC enable, station interface (DEV/BSS info), HW scan, beacon list | **this version (v0.14)** |
+| 4b | Scan results as OID_802_11_BSSID_LIST for wpa_supplicant | |
 | 4 | MCU commands: read MAC from EEPROM, hw_scan → `BSSID_LIST` | |
 | 5 | Mini-MLME: auth/assoc, EAPOL via 802_1X_RX/TX, keys via ADD_KEY | |
 | 6 | NDIS 2.0.1 MAC: PROTMAN binding, 802.3 ⇄ 802.11 data path for TCP/IP | |
@@ -81,7 +82,15 @@ wrndtest /fw
 ```
 
 After a warm reboot the WiFi firmware is still running in the chip; since
-v0.13 `/fw` then reuses it and only sets up the host DMA again. Expected: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
+v0.13 `/fw` then reuses it and only sets up the host DMA again. First scan (after `/fw`, same boot):
+
+```
+wrndtest /scan
+```
+
+Expected: `OK at step 7 (done)` and a list of nearby networks.
+
+Expected for `/fw`: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
 (sem get 1 = the patch was already loaded). The WFSYS reset is off by
 default since v0.10 (`/x:8` turns it on; with it the WFDMA never starts).
 

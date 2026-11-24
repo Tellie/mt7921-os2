@@ -6,6 +6,7 @@
  *   /hw  run the phase 2 hardware probe (fw/driver own + chip ID)
  *   /fw  run the phase 3a firmware boot (WFDMA + ROM patch download)
  *   /x:N experiment flags for /fw (hex, see FWX_ in wrnd_ioctl.h)
+ *   /scan  phase 4a: first scan (run /fw first, same session)
  */
 #define INCL_DOS
 #define INCL_DOSDEVIOCTL
@@ -253,6 +254,64 @@ static void fw_boot(void)
     }
 }
 
+static void scan_print_st(const char *name, unsigned v)
+{
+    if (v == 0xFFFF)      printf("  %-16s - (no answer)\n", name);
+    else if (v == 0xFFFE) printf("  %-16s not sent (TX timeout)\n", name);
+    else                  printf("  %-16s answered (%u)\n", name, v);
+}
+
+static void do_scan(void)
+{
+    static MT7921_SCAN s;
+    static const char *stp[] = { "start", "EFUSE_BUFFER_MODE", "MAC_INIT_CTRL",
+        "DEV_INFO_UPDATE", "BSS_INFO_UPDATE", "START_HW_SCAN",
+        "collect beacons", "done" };
+    static const char *err[] = { "OK", "firmware not running - run /fw first",
+        "command not taken by DMA", "no answer from the firmware",
+        "firmware returned an error", "no SCAN_DONE event (timeout)" };
+    ULONG st, done;
+    int rc, i, k;
+
+    memset(&s, 0, sizeof(s));
+    printf("\nScan (the system pauses for up to ~10 seconds) ...\n");
+    rc = oid_req(0, OID_PRIVATE_MT7921_SCAN, &s, sizeof(s), &st, &done);
+    printf("Scan: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st || s.Magic != MT7921_SCAN_MAGIC) {
+        printf("  driver does not support /scan (old MT7921.OS2?)\n");
+        return;
+    }
+    printf("  result          %s at step %u (%s)\n",
+           s.Error < 6 ? err[s.Error] : "?", s.Step, s.Step < 8 ? stp[s.Step] : "?");
+    scan_print_st("EFUSE mode", s.StEfuse);
+    scan_print_st("MAC enable", s.StMacEn);
+    printf("  DEV_INFO        UNI status %08lX (0 = OK)\n", s.DevUni);
+    printf("  BSS_INFO        UNI status %08lX (0 = OK)\n", s.BssUni);
+    printf("  HW_SCAN         %s\n", s.StScan == 0 ? "sent" :
+           s.StScan == 0xFFFE ? "not sent (TX timeout)" : "-");
+    printf("  RX frames       %lu, beacons/probe responses %lu, other events %lu\n",
+           s.Frames, s.Beacons, s.Events);
+    printf("  SCAN_DONE       %s after %lu polls\n", s.ScanDone ? "yes" : "NO", s.Polls);
+    if (s.FirstLen) {
+        printf("  first RX frame  %u bytes:", s.FirstLen);
+        for (i = 0; i < 64 && i < s.FirstLen; i++)
+            printf("%s%02X", i % 16 ? " " : "\n    ", s.FirstFrame[i]);
+        printf("\n");
+    }
+    printf("\n  %u network(s) found:\n", s.NBss);
+    for (i = 0; i < s.NBss; i++) {
+        MT7921_BSS *b = &s.Bss[i];
+        char ssid[33];
+        for (k = 0; k < b->SsidLen && k < 32; k++)
+            ssid[k] = (b->Ssid[k] >= 32 && b->Ssid[k] < 127) ? b->Ssid[k] : '.';
+        ssid[k] = 0;
+        printf("    %02X:%02X:%02X:%02X:%02X:%02X  ch %3u  %s\n",
+               b->Bssid[0], b->Bssid[1], b->Bssid[2], b->Bssid[3],
+               b->Bssid[4], b->Bssid[5], b->Channel,
+               b->SsidLen ? ssid : "(hidden)");
+    }
+}
+
 static void show_u32(const char *name, ULONG oid)
 {
     ULONG v = 0, st, done;
@@ -264,7 +323,7 @@ static void show_u32(const char *name, ULONG oid)
 int main(int argc, char **argv)
 {
     const char *dev = "WRND32$";
-    int do_hw = 0, do_fw = 0, i;
+    int do_hw = 0, do_fw = 0, do_sc = 0, i;
     ULONG action, st, done;
     APIRET rc;
     MT7921_INFO info;
@@ -275,6 +334,8 @@ int main(int argc, char **argv)
             do_hw = 1;
         else if (!stricmp(argv[i], "/fw") || !stricmp(argv[i], "-fw"))
             do_fw = 1;
+        else if (!stricmp(argv[i], "/scan") || !stricmp(argv[i], "-scan"))
+            do_sc = 1;
         else if (!strnicmp(argv[i], "/x:", 3))
             fwx_flags = (unsigned)strtoul(argv[i] + 3, NULL, 16);
         else
@@ -326,6 +387,8 @@ int main(int argc, char **argv)
         hw_probe();
     if (do_fw)
         fw_boot();
+    if (do_sc)
+        do_scan();
 
     DosClose(hDev);
     return 0;

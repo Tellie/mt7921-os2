@@ -335,6 +335,57 @@ typedef struct _MT7921_FWBOOT {     /* 328 bytes */
                                            (off by default: the firmware
                                            survives it anyway)         */
 
+/* ---- Phase 4a: first scan (OID_PRIVATE_MT7921_SCAN) ------------- */
+#define OID_PRIVATE_MT7921_SCAN        0xFFFFFF83UL
+#define MT7921_SCAN_MAGIC              0x4E414353UL     /* "SCAN" */
+
+#define SCN_STEP_START      0
+#define SCN_STEP_EFUSE      1       /* EXT EFUSE_BUFFER_MODE          */
+#define SCN_STEP_MAC_EN     2       /* EXT MAC_INIT_CTRL              */
+#define SCN_STEP_DEV_INFO   3       /* UNI DEV_INFO_UPDATE            */
+#define SCN_STEP_BSS_INFO   4       /* UNI BSS_INFO_UPDATE            */
+#define SCN_STEP_HW_SCAN    5       /* CE START_HW_SCAN               */
+#define SCN_STEP_COLLECT    6       /* beacons until SCAN_DONE        */
+#define SCN_STEP_DONE       7
+
+#define SCN_OK              0
+#define SCN_ERR_NO_FW       1       /* run /fw first                  */
+#define SCN_ERR_TX          2       /* command not taken by DMA       */
+#define SCN_ERR_NO_EVENT    3       /* no answer from the firmware    */
+#define SCN_ERR_STATUS      4       /* firmware returned an error     */
+#define SCN_ERR_NO_DONE     5       /* no SCAN_DONE event (timeout)   */
+
+#define SCAN_MAX_BSS        16
+
+#pragma pack(1)
+typedef struct _MT7921_BSS {        /* 40 bytes */
+    unsigned char  Bssid[6];
+    unsigned char  Channel;         /* from the DS parameter IE        */
+    unsigned char  SsidLen;
+    char           Ssid[32];
+} MT7921_BSS;
+
+typedef struct _MT7921_SCAN {       /* 748 bytes */
+    unsigned long  Magic;
+    unsigned short Step;
+    unsigned short Error;
+    unsigned short StEfuse;         /* status byte, FFFF none, FFFE TX */
+    unsigned short StMacEn;
+    unsigned long  DevUni;          /* UNI event status (0 = OK)      */
+    unsigned long  BssUni;
+    unsigned short StScan;          /* 0 = taken by DMA (no answer)   */
+    unsigned short ScanDone;        /* 1 = SCAN_DONE event seen       */
+    unsigned long  Frames;          /* RX ring 2 frames               */
+    unsigned long  Beacons;         /* beacons / probe responses      */
+    unsigned long  Events;          /* other MCU events while waiting */
+    unsigned long  Polls;
+    unsigned short NBss;
+    unsigned short FirstLen;        /* length of the first RX2 frame  */
+    unsigned char  FirstFrame[64];  /* its first 64 bytes (RXD layout) */
+    MT7921_BSS     Bss[SCAN_MAX_BSS];
+} MT7921_SCAN;
+#pragma pack()
+
 /* order of MT7921_FWBOOT.Dump[] */
 #define DUMP_LPCTL          0   /* 0x7C060010 CONN_ON_LPCTL          */
 #define DUMP_CONN_MISC      1   /* 0x7C0600F0 CONN_ON_MISC           */
