@@ -146,6 +146,16 @@ static void fw_boot(void)
     }
     printf("  result          %s at step %u (%s)\n",
            fwb_err(b.Error), b.Step, fwb_step(b.Step));
+    {
+        static const char *br[] = { "-, firmware started earlier in this session",
+            "PCIe bus reset done", "PCIe bus reset FAILED - card did not come back",
+            "no root port found", "cold start",
+            "firmware from previous session reused (host DMA re-set up)" };
+        printf("  start mode      %s", b.BusReset < 6 ? br[b.BusReset] : "?");
+        if (b.BusReset == 1 || b.BusReset == 2)
+            printf(", card answered after %lu config reads", b.ResetPolls);
+        printf("\n");
+    }
     printf("  patch file      %s, %lu bytes at %08lX\n",
            fws(b.FwState), b.FwSize, b.FwPhys);
     printf("  patch header    build %.16s  hw/sw %08lX  ver %08lX  regions %lu\n",
@@ -167,6 +177,12 @@ static void fw_boot(void)
     printf("  CONN_ON_MISC    %08lX after %lu polls (bits 0+1 = N9 ready)\n",
            b.ConnMisc, b.N9Polls);
     printf("  last event ring %u\n", b.EvtRing);
+    if (b.NicStatus == 0)
+        printf("  NIC capability  %u TLVs (mask %08lX), MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+               b.NicElems, b.CapMask, b.Mac[0], b.Mac[1], b.Mac[2],
+               b.Mac[3], b.Mac[4], b.Mac[5]);
+    else
+        st_print("NIC capability", b.NicStatus);
     printf("  last cmd        0x%02X, last event %lu bytes:", b.LastCmd, b.LastEvtLen);
     for (i = 0; i < 24; i++)
         printf("%s%02X", i % 8 ? " " : "\n    ", b.LastEvt[i]);
@@ -228,7 +244,9 @@ static void fw_boot(void)
 
     if (b.Error == 0 && b.Step == 14) {
         if (b.SemGet == 0xFFFF)
-            printf("\n  => WiFi firmware was already running (CONN_ON_MISC N9 ready)\n");
+            printf("\n  => WiFi firmware was already running%s\n",
+                   b.NicStatus == 0 ? " and answers commands" :
+                   " but did NOT answer the NIC capability command");
         else
             printf("\n  => WiFi firmware is RUNNING: patch %s, RAM code started, N9 ready\n",
                    b.SemGet == 1 ? "was already loaded" : "downloaded");

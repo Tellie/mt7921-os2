@@ -239,7 +239,7 @@ typedef struct _MT7921_HWPROBE {   /* 68 bytes */
 #define FWS_NO_MEMORY           2
 #define FWS_READ_ERROR          3
 
-typedef struct _MT7921_FWBOOT {     /* 304 bytes */
+typedef struct _MT7921_FWBOOT {     /* 328 bytes */
     unsigned long  Magic;
     unsigned short Step;            /* last step reached (FWB_STEP_x) */
     unsigned short Error;           /* FWB_ERR_x                      */
@@ -302,7 +302,26 @@ typedef struct _MT7921_FWBOOT {     /* 304 bytes */
     unsigned long  N9Polls;
     char           FwVer[10];       /* from the trailer               */
     char           FwDate[14];
+    /* v0.12 */
+    unsigned short BusReset;        /* BRS_x                          */
+    unsigned short NicStatus;       /* 0 = NIC capability answered,
+                                       FFFF no event, FFFE not sent   */
+    unsigned long  ResetPolls;      /* config reads until the card
+                                       answered again after the reset */
+    unsigned char  Mac[6];          /* from NIC capability (TLV 7)    */
+    unsigned short NicElems;        /* number of TLVs in the answer   */
+    unsigned long  CapMask;         /* bit n = TLV type n seen (0..31)*/
+    unsigned long  NicEvtLen;
 } MT7921_FWBOOT;
+
+#define BRS_NOT_DONE    0           /* firmware was already running   */
+#define BRS_DONE        1           /* secondary bus reset done       */
+#define BRS_FAILED      2           /* card did not come back         */
+#define BRS_NO_PORT     3           /* root port not found            */
+#define BRS_SKIPPED     4           /* not requested (default)        */
+#define BRS_REATTACHED  5           /* v0.13: firmware from a previous
+                                       session found; host DMA re-set
+                                       up and the firmware reused    */
 
 /* v0.08: experiment flags, passed IN the Magic field of the buffer   */
 #define FWX_KEEP_DMASHDL_BYPASS 0x0001  /* set DMASHDL bypass after RST  */
@@ -312,6 +331,9 @@ typedef struct _MT7921_FWBOOT {     /* 304 bytes */
                                            with it WFDMA never starts  */
 #define FWX_NO_WFDMA_RST        0x0010  /* skip the WFDMA0_RST pulse     */
 #define FWX_BM_LATE             0x0020  /* v0.07 order: BM after reset   */
+#define FWX_BUS_RESET           0x0040  /* v0.13: do the PCIe bus reset
+                                           (off by default: the firmware
+                                           survives it anyway)         */
 
 /* order of MT7921_FWBOOT.Dump[] */
 #define DUMP_LPCTL          0   /* 0x7C060010 CONN_ON_LPCTL          */

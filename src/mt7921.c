@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x000B          /* 0.11 */
+#define DRV_VERSION     0x000D          /* 0.13 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -570,7 +570,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.11 - MediaTek MT7921 wireless (phase 3b)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.13 - MediaTek MT7921 wireless (phase 3c)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -809,6 +809,9 @@ static void HwProbe(void)
 
 #define MCU_CMD_TARGET_ADDR_LEN 0x01
 #define MCU_CMD_FW_START        0x02
+#define MCU_CE_CMD_GET_NIC_CAPAB 0x8A
+#define MCU_Q_SET               1
+#define MCU_Q_NA                3
 #define MCU_CMD_PATCH_START     0x05
 #define MCU_CMD_PATCH_FINISH    0x07
 #define MCU_CMD_PATCH_SEM       0x10
@@ -834,6 +837,10 @@ static RING rRx4  = { REG_RX_RING_BASE + 0x040, OFS_RX4,  4,  OFS_RXB4 };
 
 static UCHAR gSeq;
 static UCHAR gPayload[16];
+static UCHAR gSetQuery = MCU_Q_NA;              /* set_query of next McuSend */
+static UCHAR gEvt[1024];                        /* last matching event       */
+static USHORT gEvtLen;
+static int   gFwRunning;                        /* RAM firmware started by us */
 
 static ULONG DmaRd(USHORT off)
 {
@@ -1020,8 +1027,9 @@ static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
     DmaWrHL(OFS_CMD + 0, 0x4100, total);        /* Q_IDX 0x20, PKT_FMT CMD */
     DmaWrHL(OFS_CMD + 4, 0x8001, 0);            /* LONG_FORMAT, HDR CMD    */
     DmaWrHL(OFS_CMD + 32, 0x8000, total - 32);  /* pq_id : len            */
-    DmaWrHL(OFS_CMD + 36, (USHORT)(((USHORT)seq << 8) | 3),   /* seq, Q_NA */
+    DmaWrHL(OFS_CMD + 36, (USHORT)(((USHORT)seq << 8) | gSetQuery), /* seq, set_query */
             (USHORT)(0xA000 | cid));            /* pkt_type 0xa0, cid      */
+    gSetQuery = MCU_Q_NA;                       /* back to the default     */
     for (i = 0; i < plen; i++)
         buf[64 + i] = gPayload[i];
 
@@ -1041,6 +1049,8 @@ static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
         FarCopy((UCHAR FAR *)gBoot.LastEvt, ev + 24, 24);
         if (len >= 33 && ev[29] == seq) {
             USHORT st = ev[32];
+            gEvtLen = len > sizeof(gEvt) ? sizeof(gEvt) : len;
+            FarCopy((UCHAR FAR *)gEvt, ev, gEvtLen);
             RxRelease(rr);
             return st;
         }
@@ -1309,6 +1319,8 @@ static void CheckVtd(void)
     gBoot.DmarFound = n;
 }
 
+static void NicCap(void);
+
 /* ---- RAM code (mt76_connac2_load_ram / send_ram_firmware) -------- */
 static UCHAR RamByte(ULONG ofs)
 {
@@ -1412,7 +1424,153 @@ static void RamBoot(void)
     gBoot.N9Polls = n;
     if (n > 3000000UL) { Fwb(FWB_STEP_N9_READY, FWB_ERR_TIMEOUT); return; }
 
+    gFwRunning = 1;
     Fwb(FWB_STEP_DONE, FWB_OK);
+    NicCap();                                   /* real MAC address */
+}
+
+/* ---- PCIe secondary bus reset of the card (v0.12) ----------------- */
+/* After a warm reboot the chip still holds the patch/firmware and old
+ * DMA rings of the previous session. Resetting the link below the root
+ * port gives a cold chip, like a power cycle. Config space of the card
+ * is saved and restored around it.                                   */
+static void CfgDelay(ULONG n)                   /* ~1 us per config read */
+{
+    while (n--)
+        (void)CfgRd(0, gBoot.RpDevFn, 0x00);
+}
+
+static USHORT BusReset(void)
+{
+    static ULONG save[16], devctl, lnkctl;
+    UCHAR b = gInfo.Bus, df = gInfo.DevFunc, rp = gBoot.RpDevFn;
+    ULONG bc, n;
+    U32W v;
+    USHORT i;
+
+    if (rp == 0xFF || !gBoot.RpCap)
+        return BRS_NO_PORT;
+
+    for (i = 0; i < 16; i++)
+        save[i] = CfgRd(b, df, (UCHAR)(i * 4));
+    if (gBoot.DevCap) {
+        devctl = CfgRd(b, df, gBoot.DevCap + 0x08);
+        lnkctl = CfgRd(b, df, gBoot.DevCap + 0x10);
+    }
+
+    bc = CfgRd(0, rp, 0x3C);                    /* bridge control in 31:16 */
+    CfgWr(0, rp, 0x3C, bc | 0x00400000UL);      /* bit 6: secondary reset  */
+    CfgDelay(5000UL);                           /* hold >= 1 ms            */
+    CfgWr(0, rp, 0x3C, bc & ~0x00400000UL);
+    CfgDelay(300000UL);                         /* >= 100 ms link + init   */
+
+    for (n = 1; n <= 1000000UL; n++) {
+        v.l = CfgRd(b, df, 0x00);
+        if (v.w.lo == MT_VENDOR && v.w.hi == MT_DEVICE)
+            break;
+    }
+    gBoot.ResetPolls = n;
+    if (n > 1000000UL)
+        return BRS_FAILED;
+
+    /* restore: BARs first, then misc, PCIe control, command last */
+    for (i = 4; i <= 9; i++)
+        CfgWr(b, df, (UCHAR)(i * 4), save[i]);
+    CfgWr(b, df, 0x0C, save[3]);
+    CfgWr(b, df, 0x3C, save[15]);
+    if (gBoot.DevCap) {
+        CfgWr(b, df, gBoot.DevCap + 0x08, devctl & 0x0000FFFFUL);
+        CfgWr(b, df, gBoot.DevCap + 0x10, lnkctl & 0x0000FFFFUL);
+    }
+    CfgWr(b, df, 0x04, save[1] & 0x0000FFFFUL);
+    gWinBase = 0xFFFFFFFFUL;
+    return BRS_DONE;
+}
+
+/* ---- first command to the running firmware (v0.12) --------------- */
+/* mt7921_mcu_get_nic_capability(): CE command 0x8a, no payload; the
+ * answer is rxd (36 bytes), n_element (le16, +2 rsv), then TLVs of
+ * { le32 type, le32 len, data }. Type 7 = MAC address.               */
+static USHORT EvtLe16(USHORT o) { return (USHORT)(gEvt[o] | ((USHORT)gEvt[o + 1] << 8)); }
+
+static void NicCap(void)
+{
+    USHORT st, n, i, p;
+    U32W m;
+
+    gSetQuery = MCU_Q_SET;
+    st = McuSend(MCU_CE_CMD_GET_NIC_CAPAB, 0, 1);
+    if (st >= 0xFFFE) { gBoot.NicStatus = st; return; }
+    gBoot.NicStatus = 0;
+    gBoot.NicEvtLen = gEvtLen;
+    if (gEvtLen < 40) return;
+
+    n = EvtLe16(36);
+    gBoot.NicElems = n;
+    m.l = 0;
+    for (i = 0, p = 40; i < n && p + 8 <= gEvtLen; i++) {
+        USHORT type = EvtLe16(p), len = EvtLe16(p + 4);
+        p += 8;
+        if (p + len > gEvtLen) break;
+        if (type < 16)      m.w.lo |= (USHORT)(1U << type);
+        else if (type < 32) m.w.hi |= (USHORT)(1U << (type - 16));
+        if (type == 7 && len >= 6) {            /* MT_NIC_CAP_MAC_ADDR */
+            FarCopy((UCHAR FAR *)gBoot.Mac, (UCHAR FAR *)&gEvt[p], 6);
+            FarCopy((UCHAR FAR *)gMac, (UCHAR FAR *)&gEvt[p], 6);
+        }
+        p += len;
+    }
+    gBoot.CapMask = m.l;
+}
+
+/* ---- reuse firmware from a previous session (v0.13) -------------- */
+/* Order matters: the old DMA rings may point into memory that OS/2
+ * has since given to someone else (maybe even to us). So: take driver
+ * ownership, stop WFDMA while bus mastering is still off, then build
+ * fresh rings, and only then allow bus mastering and start WFDMA.    */
+static void Reattach(void)
+{
+    ULONG n;
+    U32W a;
+
+    gBoot.BusReset = BRS_REATTACHED;
+
+    if (OwnHandshake()) { Fwb(FWB_STEP_OWN, FWB_ERR_TIMEOUT); return; }
+    gBoot.ChipId = L1Rd(HW_CHIPID);
+    a.l = gBoot.ChipId;
+    if (a.w.lo != 0x7961) { Fwb(FWB_STEP_CHIPID, FWB_ERR_CHIPID); return; }
+
+    Wr(REG_HOST_INT_ENA, 0);
+    DmaDisable();                       /* stop stale DMA first          */
+
+    FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    RingInitTx(&rTx0);
+    Wr(REG_TX_EXT_CTRL, 0x00000004UL);
+    RingInitTx(&rWm);
+    RingInitTx(&rFwdl);
+    RingInitRx(&rRx0);
+    RingInitRx(&rRx4);
+    RingInitRx(&rRx2);
+
+    EnableBusMaster();
+    if (!(gBoot.PciCmd & 0x0004)) { Fwb(FWB_STEP_BUSMASTER, FWB_ERR_TIMEOUT); return; }
+    Wr(0x00010188UL, 0x000000FFUL);     /* PCIE_MAC_INT_ENABLE */
+    DmaEnable();
+    gBoot.GloCfg = Rd(REG_GLO_CFG);
+
+    /* mt7921e_driver_own + L0s off, as after a normal boot */
+    L1Wr(L1_TOP_LPCR_HOST_BAND0, 0x00000002UL);
+    for (n = 1; n <= 500000UL; n++)
+        if (!(L1Rd(L1_TOP_LPCR_HOST_BAND0) & 0x00000001UL))
+            break;
+    gBoot.Polls = n;
+    if (n > 500000UL) { Fwb(FWB_STEP_MCU_OWN, FWB_ERR_TIMEOUT); return; }
+    Set(REG_PCIE_MAC_PM, 0x00000100UL);
+
+    gFwRunning = 1;
+    Fwb(FWB_STEP_DONE, FWB_OK);
+    NicCap();
 }
 
 static void FwBoot(void)
@@ -1431,6 +1589,22 @@ static void FwBoot(void)
     gBoot.SemGet = gBoot.SemRel = gBoot.Finish = 0xFFFF;
     gWinBase = 0xFFFFFFFFUL;
     gFwWin   = 0xFFFFFFFFUL;
+    gBoot.Flags    = gFwx;
+    gBoot.RamState = gRamState;
+    gBoot.RamSize  = gRamSize;
+    gBoot.RamPhys  = gRamPhys;
+    gBoot.FwStart  = 0xFFFF;
+    gBoot.NicStatus = 0xFFFF;
+
+    /* firmware started earlier by this driver: leave rings alone, only
+     * talk to it                                                      */
+    if (gFwRunning) {
+        gBoot.BusReset = BRS_NOT_DONE;
+        gBoot.ConnMisc = Rd(REG_CONN_ON_MISC);
+        NicCap();
+        Fwb(FWB_STEP_DONE, FWB_OK);
+        return;
+    }
 
     if (gSel) CheckVtd();                       /* diagnostics only */
     gBoot.DevCap = FindPcieCap(gInfo.Bus, gInfo.DevFunc);
@@ -1438,8 +1612,26 @@ static void FwBoot(void)
 
     if (!gSel || gFwState != FWS_LOADED) { Fwb(FWB_STEP_START, FWB_ERR_NO_FW); return; }
     if (!gDmaPhys)                       { Fwb(FWB_STEP_START, FWB_ERR_NO_DMA); return; }
+
+    /* v0.12: cold chip via PCIe secondary bus reset (warm reboot fix) */
+    if (!(gFwx & FWX_BUS_RESET)) {
+        gBoot.BusReset = BRS_SKIPPED;
+    } else {
+        gBoot.BusReset = BusReset();
+        if (gBoot.BusReset == BRS_FAILED) { Fwb(FWB_STEP_START, FWB_ERR_TIMEOUT); return; }
+    }
+
+    /* v0.13: WiFi firmware still running from a previous session (warm
+     * reboot): keep it and only set up the host side again, like the
+     * Linux wake-up path (mt792x_wpdma_reinit_cond)                   */
+    gBoot.ConnMisc = Rd(REG_CONN_ON_MISC);
+    if ((gBoot.ConnMisc & 3UL) == 3UL) {
+        Reattach();
+        return;
+    }
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    gSeq = 0;
 
     /* patch header (mt76_connac2_patch_hdr, big endian) */
     h = FwPtr(0);
@@ -1452,16 +1644,6 @@ static void FwBoot(void)
         Fwb(FWB_STEP_START, FWB_ERR_BAD_PATCH); return;
     }
 
-    gBoot.Flags = gFwx;
-    gBoot.RamState = gRamState;
-    gBoot.RamSize  = gRamSize;
-    gBoot.RamPhys  = gRamPhys;
-    gBoot.FwStart  = 0xFFFF;
-
-    /* firmware already running (an earlier /fw)? then do not touch the
-     * DMA rings again - the firmware is using them                    */
-    gBoot.ConnMisc = Rd(REG_CONN_ON_MISC);
-    if ((gBoot.ConnMisc & 3UL) == 3UL) { Fwb(FWB_STEP_DONE, FWB_OK); return; }
 
     /* 0. bus master first, like pci_set_master() at the top of
      *    mt7921_pci_probe() (v0.07 did this after the WFSYS reset)   */
