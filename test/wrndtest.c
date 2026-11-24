@@ -293,8 +293,8 @@ static void do_scan(void)
     printf("  BSS_INFO        UNI status %08lX (0 = OK)\n", s.BssUni);
     printf("  HW_SCAN         %s\n", s.StScan == 0 ? "sent" :
            s.StScan == 0xFFFE ? "not sent (TX timeout)" : "-");
-    printf("  RX frames       %lu, beacons/probe responses %lu, other events %lu\n",
-           s.Frames, s.Beacons, s.Events);
+    printf("  RX frames       %lu on ring 2, %lu on the MCU rings, beacons/probe responses %lu\n",
+           s.Frames, s.Events, s.Beacons);
     printf("  SCAN_DONE       %s after %lu polls\n", s.ScanDone ? "yes" : "NO", s.Polls);
     if (s.ScanDone)
         printf("                  seq %u, channels scanned %u, state %u, beacons %lu, country %.3s\n",

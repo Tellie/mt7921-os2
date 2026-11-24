@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x000F          /* 0.15 */
+#define DRV_VERSION     0x0010          /* 0.16 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -570,7 +570,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.15 - MediaTek MT7921 wireless (phase 4a)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.16 - MediaTek MT7921 wireless (phase 4a)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -1946,14 +1946,23 @@ static void ScanCollect(void)
             RING *r = evr[k];
             c.l = DmaRd(r->desc + r->tail * 16 + 4);
             if (c.w.hi & DESC_DMA_DONE_HI) {
+                USHORT len = (USHORT)(c.w.hi & 0x3FFF);
                 UCHAR FAR *ev = (UCHAR FAR *)MkFar(gDmaSel, r->bufs + r->tail * RX_BUF);
+                if (len > RX_BUF) len = RX_BUF;
                 if (ev[28] == MCU_EVENT_SCAN_DONE) {
                     gScan.ScanDone = 1;
                     FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
                 } else {
+                    /* v0.16: during the scan the beacons arrive here (ring 4),
+                     * not on RX ring 2: treat them as frames too           */
                     if (gScan.Events < 8)
                         gScan.EvtIds[(USHORT)gScan.Events] = ev[28];
+                    if (gScan.Events == 0 && gScan.Frames == 0) {
+                        gScan.FirstLen = len;
+                        FarCopy((UCHAR FAR *)gScan.FirstFrame, ev, len < 64 ? len : 64);
+                    }
                     gScan.Events++;
+                    ParseFrame(ev, len);
                 }
                 RxRelease(r);
             }
