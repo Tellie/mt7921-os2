@@ -19,7 +19,7 @@
 USHORT g_roc_held;
 USHORT g_rxs[2][6];                                 /* RX security counters, see mt_rx_frame               */
 ULONG  g_rxs_d1[4];
-UCHAR  g_rxs_fc[4];
+UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
 static UCHAR  g_roc_token;
 static net_t *g_mnet;                               /* the AP of the current join                         */
@@ -127,9 +127,10 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
       else if (sec)                    g_rxs[m][3]++;   /* decrypted                                           */
       else if (b[h + 1] & 0x40)        g_rxs[m][4]++;   /* protected, not decrypted, no error bit              */
       else                             g_rxs[m][5]++;   /* plain                                               */
-      if (g_rxs_n < 4 && (b[7] & 0x0A || (b[h + 1] & 0x40 && !sec))) {
-         g_rxs_d1[g_rxs_n] = get32(b + 4);             /* rxd1 of the first bad ones                          */
+      if (g_rxs_n < 4 && (b[7] & 0x0B || b[6] & 0x80 || (b[h + 1] & 0x40 && !sec))) {
+         g_rxs_d1[g_rxs_n] = get32(b + 4);             /* rxd1 of the first bad ones: WLAN_IDX bits 9:0, ...  */
          g_rxs_fc[g_rxs_n] = b[h + 1];
+         fmemcpy((UCHAR FAR *)g_rxs_a[g_rxs_n], b + h + 4, 18);   /* addr1, addr2, addr3                    */
          g_rxs_n++;
       }
    }

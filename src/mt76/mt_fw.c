@@ -491,9 +491,15 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
          for (j = 0; j < 6; j++) { ps(nm[j]); ph(g_rxs[i][j], 4); }
          nl();
       }
-      if (g_rxs_n) {
-         ps("RXSEC first bad (rxd1/fc1):");
-         for (i = 0; i < g_rxs_n; i++) { ps(" "); ph(g_rxs_d1[i], 8); ps("/"); ph(g_rxs_fc[i], 2); }
+      for (i = 0; i < g_rxs_n; i++) {
+         USHORT j;
+
+         ps("RXSEC bad: wcid="); ph(g_rxs_d1[i] & 0x3FFUL, 3); ps(" rxd1="); ph(g_rxs_d1[i], 8);
+         ps(" fc1="); ph(g_rxs_fc[i], 2); ps(" a1/a2/a3=");
+         for (j = 0; j < 18; j++) {
+            if (j && j % 6 == 0) ps(" ");
+            ph(g_rxs_a[i][j], 2);
+         }
          nl();
       }
       ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");
