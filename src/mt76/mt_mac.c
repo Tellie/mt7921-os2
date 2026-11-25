@@ -20,6 +20,10 @@ USHORT g_roc_held;
 static UCHAR  g_roc_token;
 static net_t *g_mnet;                               /* the AP of the current join                         */
 static USHORT g_txlk;
+static UCHAR  g_pid = 2;                            /* TX status packet ids 3..63 (MT_PACKET_ID_FIRST = 3)  */
+UCHAR  g_pidfc[64];                                 /* frame control byte of the frame sent with that pid  */
+UCHAR  g_txs_fc[8], g_txs_err[8];                   /* the last 8 TX status reports                        */
+USHORT g_txs_n;
 
 USHORT g_uni_st[4];                                 /* DEV_INFO, BSS_INFO at bring-up; last join command   */
 ULONG  g_uni_val[4];
@@ -120,6 +124,22 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
    sta_rx_frame(b + h, (USHORT)(len - h), b[13], rssi, fl, 0UL);
 }
 
+/* PKT_TYPE_TXS: 8-dword records from dword 2; TXS0 bits 18:16 = ACK / RTS / queue timeout, TXS3 31:24 = PID */
+void mt_txs(UCHAR FAR *b, USHORT len)
+{
+   USHORT p;
+
+   for (p = 8; p + 32 <= len; p += 32) {
+      UCHAR pid = b[p + 15], k = (UCHAR)(g_txs_n & 7);
+
+      if (pid < 3 || pid >= 64)
+         continue;
+      g_txs_fc[k] = g_pidfc[pid];
+      g_txs_err[k] = (UCHAR)(b[p + 2] & 0x07);
+      g_txs_n++;
+   }
+}
+
 /* ---- transmit on ring 0 ---------------------------------------------------------------------------------------- */
 #define TXF_FIXED    0x0100                         /* basic rate (management, EAPOL)                       */
 
@@ -166,6 +186,12 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    put32(b + 12, w);
    if (fixed)                                       /* FIXED_BW, CCK 1M (2.4 GHz) / OFDM 6M (5 GHz)         */
       put32(b + 24, 0x00000004UL | ((g_jch > 14 ? 0x4BUL : 0x00UL) << 16));
+   if (fixed) {                                     /* management, EAPOL: ask for a TX status report       */
+      if (++g_pid >= 64)
+         g_pid = 3;
+      g_pidfc[g_pid] = fc;
+      put32(b + 20, 0x00000400UL | g_pid);          /* dw5: TX_STATUS_HOST, PID                            */
+   }
    put32(b + 28, (24UL << 11) | ((ULONG)stype << 16) | ((ULONG)ftype << 20));
    put16(b + 32, (USHORT)(0x8000 | (slot + 1)));    /* hw TXP: msdu_id[0] = token                          */
    put32(b + 40, g_txslot[slot].phys + 64);         /* ptr[0].buf0                                         */

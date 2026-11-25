@@ -283,7 +283,11 @@ static void rx_buffer(UCHAR FAR *b, USHORT len)
       mt_rx_frame(b, len);
       return;
    }
-   if (type != 7 || len < 32) {                                 /* TX status, TX free, ...                     */
+   if (type == 0) {                                             /* PKT_TYPE_TXS                                */
+      mt_txs(b, len);
+      return;
+   }
+   if (type != 7 || len < 32) {                                 /* TX free, ...                                */
       g_rx_other++;
       return;
    }

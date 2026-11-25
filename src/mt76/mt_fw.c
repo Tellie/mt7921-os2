@@ -465,7 +465,16 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
    ps("  (status FFFF = no answer, FFFE = not sent; value = firmware status)"); nl();
    {
       USHORT i, n = (USHORT)(g_uh_n < 8 ? g_uh_n : 8);
+      USHORT m = (USHORT)(g_txs_n < 8 ? g_txs_n : 8);
 
+      ps("TXS (TX status, oldest first; frame control/error: 0 = ACKed, 1 = no ACK, 2 RTS, 4 queue timeout):");
+      for (i = 0; i < m; i++) {
+         USHORT k = (USHORT)((g_txs_n - m + i) & 7);
+
+         ps(" "); ph(g_txs_fc[k], 2); ps("/"); ph(g_txs_err[k], 1);
+      }
+      ps("  total="); ph(g_txs_n, 4);
+      nl();
       ps("UNIHIST (oldest first; cid 01 DEV 02 BSS 03 STA_REC, tag, status/firmware):");
       for (i = 0; i < n; i++) {
          USHORT k = (USHORT)((g_uh_n - n + i) & 7);
