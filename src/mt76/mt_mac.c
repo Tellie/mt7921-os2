@@ -32,6 +32,10 @@ static net_t *g_mnet;
 static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT flags, UCHAR wcid);                               /* the AP of the current join                         */
 static USHORT g_txlk;
 static UCHAR  g_pid = 2;                            /* TX status packet ids 3..63 (MT_PACKET_ID_FIRST = 3)  */
+UCHAR  g_txs_last, g_eapol_pid;                       /* pid of the last TX status; of the last EAPOL frame  */
+UCHAR  g_ev_c[16];                                   /* handshake log: event, value, ms                     */
+USHORT g_ev_v[16], g_ev_n, g_key_wait;
+ULONG  g_ev_t[16];
 UCHAR  g_pidfc[64];                                 /* frame control byte of the frame sent with that pid  */
 UCHAR  g_txs_fc[8], g_txs_err[8];                   /* the last 8 TX status reports                        */
 USHORT g_txs_n;
@@ -229,12 +233,27 @@ void mt_txs(UCHAR FAR *b, USHORT len)
       g_txs_fc[k] = g_pidfc[pid];
       g_txs_err[k] = (UCHAR)(b[p + 2] & 0x07);
       g_txs_n++;
+      g_txs_last = pid;
+      if (pid == g_eapol_pid) {
+         hw_note('S', (USHORT)g_txs_err[k]);      /* TX status of the EAPOL frame                         */
+         g_eapol_pid = 0;
+      }
       if ((g_pidfc[pid] & 0x0C) == 0x08) {
          if (g_txs_err[k]) g_txs_dbad++; else g_txs_dok++;
       } else {
          if (g_txs_err[k]) g_txs_mbad++; else g_txs_mok++;
       }
    }
+}
+
+void hw_note(UCHAR ev, USHORT val)
+{
+   USHORT k = (USHORT)(g_ev_n & 15);
+
+   g_ev_c[k] = ev;
+   g_ev_v[k] = val;
+   g_ev_t[k] = dd_ms();
+   g_ev_n++;
 }
 
 /* ---- transmit on ring 0 ---------------------------------------------------------------------------------------- */
@@ -286,6 +305,8 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    if (++g_pid >= 64)                               /* every frame: ask for a TX status report             */
       g_pid = 3;
    g_pidfc[g_pid] = fc;
+   if (flags & HWTX_EAPOL)
+      g_eapol_pid = g_pid;
    put32(b + 20, 0x00000400UL | g_pid);             /* dw5: TX_STATUS_HOST, PID                            */
    put32(b + 28, (24UL << 11) | ((ULONG)stype << 16) | ((ULONG)ftype << 20));
    put16(b + 32, (USHORT)(0x8000 | (slot + 1)));    /* hw TXP: msdu_id[0] = token                          */
@@ -576,7 +597,7 @@ int hw_join_prepare(net_t *n)
       return -1;
    roc_release();
    g_mnet = n;
-   g_tim_bcn = g_tim_set = g_tim_null = g_echo = g_act_n = 0;
+   g_tim_bcn = g_tim_set = g_tim_null = g_echo = g_act_n = g_ev_n = 0;
    fmemset((UCHAR FAR *)g_rxm, 0, sizeof(g_rxm));
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
@@ -655,6 +676,16 @@ int hw_key_set(UCHAR FAR *key, USHORT klen, USHORT pairwise, UCHAR idx)
 
    if (klen != 16 || !g_hw_ready)
       return -1;
+   if (pairwise) {                                  /* the last EAPOL frame (4-way message 4) must be on air */
+      ULONG t0 = dd_ms();                           /* before the key is in the WTBL                       */
+
+      while (g_txs_last != g_pid && (long)(dd_ms() - t0) < 300L) {
+         hw_service();
+         dd_msleep(2);
+      }
+      g_key_wait = (USHORT)(dd_ms() - t0);
+   }
+   hw_note((UCHAR)(pairwise ? 'K' : 'G'), idx);
    rc = key_cmd(key, pairwise, idx, 1);
    if (pairwise)
       roc_release();                                /* Linux keeps the JOIN ROC until the port is open     */

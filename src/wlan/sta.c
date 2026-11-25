@@ -817,6 +817,7 @@ static void rx_eth(UCHAR FAR *eth, USHORT len)
 
    if (eth[12] == 0x88 && eth[13] == 0x8E) {           /* EAPOL: to the supplicant, never to the stack      */
       g_rx_eapol++;
+      hw_note('R', len >= 21 ? (USHORT)((eth[19] << 8) | eth[20]) : 0);   /* key information               */
       if (g_eqn >= EQ_N || len > EQ_SZ) {
          g_eq_drop++;
          return;
@@ -994,6 +995,7 @@ int sta_eapol_tx(UCHAR FAR *eth, USHORT len)
    if (!g_joined || len > sizeof(buf))
       return -1;
    fmemcpy((UCHAR FAR *)buf, eth, len);
+   hw_note('T', len >= 21 ? (USHORT)((eth[19] << 8) | eth[20]) : 0);
    /* Unprotected while the pairwise key is not installed (4-way handshake messages 2 and 4); afterwards the
     * group-key handshake and re-keying must be encrypted, or the access point ignores them. */
    return tx_eth((UCHAR FAR *)buf, len, (USHORT)(HWTX_EAPOL | (g_ptk_on ? HWTX_PROTECT : 0)));

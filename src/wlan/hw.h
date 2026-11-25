@@ -63,6 +63,7 @@ int    hw_key_clear(USHORT pairwise, UCHAR idx);
  * flags: HWTX_PROTECT = encrypt with the pairwise key. Returns 0 queued, -2 busy. */
 #define HWTX_PROTECT    0x0001
 #define HWTX_EAPOL      0x0002
+void   hw_note(UCHAR ev, USHORT val);             /* MT7921 status text: handshake event log               */
 int    hw_data_tx(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT flags);
 
 #endif

@@ -518,6 +518,20 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
          for (j = 0; j < 6; j++) ph(g_act[i][j], 2);
       }
       nl();
+      ps("HANDSHAKE (R rx eapol / T tx eapol: key info, S tx status, K pairwise / G group key; +ms) keywait=");
+      ph(g_key_wait, 4); ps("ms:");
+      {
+         USHORT s0 = (USHORT)(g_ev_n > 16 ? g_ev_n - 16 : 0), j;
+
+         for (j = s0; j < g_ev_n; j++) {
+            USHORT k = (USHORT)(j & 15);
+            static char c[2];
+
+            c[0] = (char)g_ev_c[k]; c[1] = 0;
+            ps(" "); ps(c); ph(g_ev_v[k], 4); ps("+"); ph(g_ev_t[k] - g_ev_t[s0 & 15], 4);
+         }
+      }
+      nl();
       ps("ECHO (our own broadcasts sent back by the AP = it decrypted our frames)="); ph(g_echo, 4);
       ps(" AP-WMM="); ph(g_jnet ? g_jnet->wmm : 0xFF, 2); nl();
       ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");
