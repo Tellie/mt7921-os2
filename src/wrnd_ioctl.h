@@ -139,6 +139,7 @@ typedef struct _WRND_PARM {
 #define NDIS_STATUS_BUFFER_TOO_SHORT   0xC0010016UL
 #define NDIS_STATUS_RESOURCES          0xC000009AUL
 #define NDIS_STATUS_FAILURE            0xC0000001UL
+#define NDIS_STATUS_ADAPTER_NOT_READY  0xC0010011UL
 
 #define WRND_MAX_DATA                  10000UL  /* caller caps Parm[1] */
 
@@ -425,9 +426,19 @@ typedef struct _MT7921_SCAN {       /* 824 bytes */
 #define AUT_ERR_STATUS      5       /* firmware/AP returned an error  */
 #define AUT_ERR_NO_GRANT    6       /* no ROC grant event             */
 #define AUT_ERR_NO_RESP     7       /* no authentication response     */
+#define AUT_ERR_NO_ASSOC    8       /* no association response        */
+#define AUT_ERR_ASSOC       9       /* association refused (status)   */
+
+#define AUT_STEP_ASSOC      7       /* v0.20: association request     */
+#define AUT_STEP_BSS        8       /* BSS_INFO + STA_REC (ASSOC)     */
+#define AUT_STEP_CONNECTED  9
+
+/* v0.20: full connect test, same MT7921_AUTH buffer (Mode = 1).
+ * wpa_supplicant uses the same code via OID_802_11_SSID.            */
+#define OID_PRIVATE_MT7921_CONNECT     0xFFFFFF85UL
 
 #pragma pack(1)
-typedef struct _MT7921_AUTH {       /* 128 bytes */
+typedef struct _MT7921_AUTH {       /* 160 bytes */
     unsigned long  Magic;
     unsigned short Step;
     unsigned short Error;
@@ -453,7 +464,21 @@ typedef struct _MT7921_AUTH {       /* 128 bytes */
                                        to us (B0 auth, C0 deauth ..)  */
     unsigned char  EvtIds[8];       /* eid of MCU events while waiting */
     unsigned long  Polls;
-    unsigned char  Rsv[35];
+    /* v0.20 */
+    unsigned char  FcFlags[8];      /* second fc byte (08 = retry)    */
+    unsigned short Seq[8];          /* sequence control of those frames */
+    unsigned short AssocStatus;     /* assoc response status, FFFF none */
+    unsigned short Aid;
+    unsigned long  BssUni;          /* BSS_INFO (connected) status    */
+    unsigned long  Sta2Uni;         /* STA_REC (AP, ASSOC) status     */
+    unsigned long  VifUni;          /* STA_REC (own BSS, wcid 19)     */
+    unsigned char  Connected;
+    unsigned char  Mode;            /* in: 0 = auth only, 1 = connect */
+    unsigned short ReqIeLen;        /* IEs we sent in the assoc request */
+    unsigned short RespIeLen;
+    unsigned short AuthTries;
+    unsigned short AssocTries;
+    unsigned char  Rsv[17];
 } MT7921_AUTH;
 #pragma pack()
 

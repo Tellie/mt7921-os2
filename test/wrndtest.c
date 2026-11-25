@@ -9,6 +9,8 @@
  *   /scan  diagnostic scan (loads the firmware if needed)
  *   /list  like wpa_supplicant: OID BSSID_LIST_SCAN, then BSSID_LIST
  *   /auth:SSID  phase 5a: one Open System authentication with that AP
+ *   /conn:SSID  phase 5b: authenticate + associate (open network or
+ *               WPA2-PSK; the key handshake needs wpa_supplicant)
  */
 #define INCL_DOS
 #define INCL_DOSDEVIOCTL
@@ -425,14 +427,15 @@ static void show_u32(const char *name, ULONG oid)
            name, rc, st, done, v, v);
 }
 
-static void do_auth(const char *ssid)
+static void do_auth(const char *ssid, int conn)
 {
     static MT7921_AUTH a;
     static const char *stp[] = { "start", "scan / pick BSS", "STA_REC_UPDATE",
         "ROC (channel)", "send auth frame", "wait for answer", "done" };
     static const char *err[] = { "OK", "firmware not running",
         "SSID not found in the scan", "not taken by DMA", "no answer",
-        "error status", "no ROC grant event", "no authentication response" };
+        "error status", "no ROC grant event", "no authentication response",
+        "no association response", "association refused" };
     ULONG st, done;
     int rc, i, n;
 
@@ -441,15 +444,17 @@ static void do_auth(const char *ssid)
     if (n > 32) n = 32;
     a.SsidLen = (unsigned char)n;
     memcpy(a.Ssid, ssid, n);
-    printf("\nAuthentication test with '%s' (may scan first, ~10 s) ...\n", ssid);
-    rc = oid_req(0, OID_PRIVATE_MT7921_AUTH, &a, sizeof(a), &st, &done);
+    printf("\n%s test with '%s' (may scan first, ~10 s) ...\n",
+           conn ? "Connect" : "Authentication", ssid);
+    rc = oid_req(0, conn ? OID_PRIVATE_MT7921_CONNECT : OID_PRIVATE_MT7921_AUTH,
+                 &a, sizeof(a), &st, &done);
     printf("Auth: rc=%d status=%08lX len=%lu\n", rc, st, done);
     if (rc || st || a.Magic != MT7921_AUTH_MAGIC) {
         printf("  driver does not support /auth (old MT7921.OS2?)\n");
         return;
     }
     printf("  result          %s at step %u (%s)\n",
-           a.Error < 8 ? err[a.Error] : "?", a.Step, a.Step < 7 ? stp[a.Step] : "?");
+           a.Error < 10 ? err[a.Error] : "?", a.Step, a.Step < 10 ? stp[a.Step] : "?");
     printf("  AP              %02X:%02X:%02X:%02X:%02X:%02X  channel %u  %d dBm\n",
            a.Bssid[0], a.Bssid[1], a.Bssid[2], a.Bssid[3], a.Bssid[4], a.Bssid[5],
            a.Channel, a.Rssi);
@@ -466,8 +471,21 @@ static void do_auth(const char *ssid)
     else
         printf("  response        alg %u, seq %u, status %u%s\n", a.AuthAlg,
                a.AuthSeq, a.AuthStatus, a.AuthStatus == 0 ? "  => AUTHENTICATED" : "");
-    printf("  frames to us    %u:", a.RxFrames);
-    for (i = 0; i < 8 && i < a.RxFrames; i++) printf(" %02X", a.Fc[i]);
+    printf("  auth tries      %u\n", a.AuthTries);
+    if (conn) {
+        printf("  assoc           %u tries, ", a.AssocTries);
+        if (a.AssocStatus == 0xFFFF) printf("no response\n");
+        else printf("status %u, AID %u%s\n", a.AssocStatus, a.Aid,
+                    a.AssocStatus == 0 ? "  => ASSOCIATED" : "");
+        printf("  IEs             request %u bytes, response %u bytes\n",
+               a.ReqIeLen, a.RespIeLen);
+        printf("  BSS_INFO        UNI %08lX, STA_REC assoc %08lX, own %08lX\n",
+               a.BssUni, a.Sta2Uni, a.VifUni);
+        printf("  connected       %s\n", a.Connected ? "YES" : "no");
+    }
+    printf("  frames to us    %u (fc/flags/seq):", a.RxFrames);
+    for (i = 0; i < 8 && i < a.RxFrames; i++)
+        printf(" %02X/%02X/%u", a.Fc[i], a.FcFlags[i], a.Seq[i] >> 4);
     printf("\n  other RX        %u:", a.RxOther);
     for (i = 0; i < 8 && i < a.RxOther; i++) printf(" %02X", a.EvtIds[i]);
     printf("\n  waited          %lu x 16 ms\n", a.Polls);
@@ -476,6 +494,7 @@ static void do_auth(const char *ssid)
 int main(int argc, char **argv)
 {
     const char *auth_ssid = NULL;
+    int auth_conn = 0;
     const char *dev = "WRND32$";
     int do_hw = 0, do_fw = 0, do_sc = 0, do_li = 0, i;
     ULONG action, st, done;
@@ -494,6 +513,10 @@ int main(int argc, char **argv)
             do_li = 1;
         else if (!strnicmp(argv[i], "/auth:", 6))
             auth_ssid = argv[i] + 6;
+        else if (!strnicmp(argv[i], "/conn:", 6)) {
+            auth_ssid = argv[i] + 6;
+            auth_conn = 1;
+        }
         else if (!strnicmp(argv[i], "/x:", 3))
             fwx_flags = (unsigned)strtoul(argv[i] + 3, NULL, 16);
         else
@@ -552,7 +575,7 @@ int main(int argc, char **argv)
     if (do_li)
         do_list();
     if (auth_ssid)
-        do_auth(auth_ssid);
+        do_auth(auth_ssid, auth_conn);
 
     DosClose(hDev);
     return 0;

@@ -119,3 +119,15 @@ wrndtest /auth:MyNetwork
 
 Expected: `ROC ... grant yes`, `auth frame taken by DMA` and
 `response alg 0, seq 2, status 0 => AUTHENTICATED`.
+
+Phase 5b connect test (authentication + association):
+
+```
+wrndtest /conn:MyNetwork
+```
+
+Expected: `assoc ... status 0, AID n => ASSOCIATED` and `connected YES`.
+wpa_supplicant uses the same code: setting the SSID makes the driver
+connect, `OID_802_11_BSSID` reports the AP, EAPOL frames go through
+`802_1X_RX`/`802_1X_TX`. Keys are not installed yet (phase 5c), so
+after the 4-way handshake there is no data traffic yet.
