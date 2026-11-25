@@ -947,7 +947,7 @@ static int tx_eth(UCHAR FAR *eth, USHORT len, USHORT flags)
    fmemcpy((UCHAR FAR *)g_hdr + 16, eth, 6);                        /* destination                          */
    seq_put((UCHAR FAR *)g_hdr);
    hl = 24;
-   if (g_aggtx && g_jht && !(flags & HWTX_EAPOL)) {   /* QoS data, TID 0 (best effort): the aggregation candidate */
+   if (g_aggtx && g_jht && g_jnet && g_jnet->wmm && !(flags & HWTX_EAPOL)) {   /* QoS only with WMM */   /* QoS data, TID 0 (best effort): the aggregation candidate */
       g_hdr[0] = 0x88;
       g_hdr[24] = g_hdr[25] = 0;
       hl = 26;

@@ -21,7 +21,7 @@ USHORT g_rxs[2][6];                                 /* RX security counters, see
 ULONG  g_rxs_d1[4];
 UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
-USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
+USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last, g_echo;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
 static ULONG g_tim_t;
 static UCHAR  g_roc_token;
 static net_t *g_mnet;
@@ -172,6 +172,9 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
    /* receive security counters, data frames only: [0] unicast, [1] group-addressed */
    if ((b[h] & 0x0C) == 0x08) {
       UCHAR m = (UCHAR)(b[h + 4] & 1);
+
+      if (m && same6(b + h + 16, (UCHAR FAR *)g_hw_mac))
+         g_echo++;                                  /* our own broadcast, sent on by the AP: it took our frame */
 
       if (b[7] & 0x08)                 g_rxs[m][0]++;   /* FCS error                                           */
       else if (b[7] & 0x02)            g_rxs[m][1]++;   /* ICV error: decryption failed                        */
@@ -530,7 +533,7 @@ int hw_join_prepare(net_t *n)
       return -1;
    roc_release();
    g_mnet = n;
-   g_tim_bcn = g_tim_set = g_tim_null = 0;
+   g_tim_bcn = g_tim_set = g_tim_null = g_echo = 0;
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
       dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);
