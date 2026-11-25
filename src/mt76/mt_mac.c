@@ -451,6 +451,12 @@ int hw_join_complete(void)
    if (bss_info(1)) { dd_err("MT7921: BSS_INFO (connected) failed", g_uni_val[3]); return -1; }
    if (sta_rec(2, g_jaid)) { dd_err("MT7921: STA_REC (AP, ASSOC) failed", g_uni_val[3]); return -1; }
    if (vif_sta_rec()) { dd_err("MT7921: STA_REC (own BSS) failed", g_uni_val[3]); return -1; }
+   /* mt7921_mcu_uni_bss_ps: power save off (device awake). Without it the firmware starts its own power
+    * save after a few idle seconds: the AP then buffers our unicast frames, only broadcasts get through. */
+   pl_zero(12);
+   pl16(4, 21); pl16(6, 8);                         /* UNI_BSS_INFO_PS                                     */
+   g_pl[8] = 0;                                     /* ps_state 0: awake                                   */
+   (void)uni(MCU_UNI_CMD_BSS_INFO_UPDATE, 12);
    if (!g_mnet->sec)
       roc_release();                                /* open network: no keys to wait for                   */
    return 0;
