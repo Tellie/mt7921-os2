@@ -137,6 +137,7 @@ int    mt_dev_bss_init(void);                   /* DEV_INFO + BSS_INFO (disconne
 void   mt_rx_frame(UCHAR FAR *b, USHORT len);   /* one RX buffer with a frame (RXD + 802.11)             */
 extern USHORT g_roc_held;
 extern USHORT g_rxs[2][6], g_rxs_n;
+extern USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last;
 extern ULONG  g_rxs_d1[4];
 extern UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 void   mt_txs(UCHAR FAR *b, USHORT len);

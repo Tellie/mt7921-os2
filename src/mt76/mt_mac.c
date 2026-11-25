@@ -21,8 +21,12 @@ USHORT g_rxs[2][6];                                 /* RX security counters, see
 ULONG  g_rxs_d1[4];
 UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
+USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
+static ULONG g_tim_t;
 static UCHAR  g_roc_token;
-static net_t *g_mnet;                               /* the AP of the current join                         */
+static net_t *g_mnet;
+#define TXF_FIXED    0x0100                         /* basic rate (management, EAPOL)                       */
+static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT flags, UCHAR wcid);                               /* the AP of the current join                         */
 static USHORT g_txlk;
 static UCHAR  g_pid = 2;                            /* TX status packet ids 3..63 (MT_PACKET_ID_FIRST = 3)  */
 UCHAR  g_pidfc[64];                                 /* frame control byte of the frame sent with that pid  */
@@ -92,6 +96,16 @@ int mt_dev_bss_init(void)
 }
 
 /* ---- receive ------------------------------------------------------------------------------------------------- */
+static int same6(UCHAR FAR *a, UCHAR FAR *b)
+{
+   USHORT i;
+
+   for (i = 0; i < 6; i++)
+      if (a[i] != b[i])
+         return 0;
+   return 1;
+}
+
 void mt_rx_frame(UCHAR FAR *b, USHORT len)
 {
    USHORT h = 24, v = 0, fl = 0;
@@ -117,6 +131,44 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
       return;
    if (h + 24 > len)
       return;
+   /* Beacons of our AP: is our AID set in the TIM (the AP holds unicast frames for us, it thinks we sleep)?
+    * Then a null data frame with PM = 0 tells it that we are awake (at most every 200 ms). */
+   if (b[h] == 0x80 && g_mnet && g_joined && g_jaid && len >= h + 36 && same6(b + h + 16, (UCHAR FAR *)g_mnet->bssid)) {
+      USHORT q = (USHORT)(h + 36), aid = (USHORT)(g_jaid & 0x7FF), set = 0;
+
+      g_tim_bcn++;
+      while (q + 2 <= len) {
+         USHORT el = b[q + 1];
+
+         if (q + 2 + el > len)
+            break;
+         if (b[q] == 5 && el >= 4) {               /* TIM: dtim count, period, bitmap control, bitmap      */
+            USHORT n1 = (USHORT)(b[q + 4] & 0xFE), k = (USHORT)(aid >> 3);
+
+            g_tim_last = b[q + 4];
+            if (k >= n1 && k <= n1 + el - 4 && (b[q + 5 + k - n1] & (1 << (aid & 7))))
+               set = 1;
+            break;
+         }
+         q = (USHORT)(q + 2 + el);
+      }
+      if (set) {
+         g_tim_set++;
+         if ((long)(dd_ms() - g_tim_t) >= 200L) {
+            UCHAR nh[24];
+
+            g_tim_t = dd_ms();
+            fmemset((UCHAR FAR *)nh, 0, 24);
+            nh[0] = 0x48;                          /* null data                                           */
+            nh[1] = 0x01;                          /* To-DS, PM = 0                                       */
+            fmemcpy((UCHAR FAR *)nh + 4, (UCHAR FAR *)g_mnet->bssid, 6);
+            fmemcpy((UCHAR FAR *)nh + 10, (UCHAR FAR *)g_hw_mac, 6);
+            fmemcpy((UCHAR FAR *)nh + 16, (UCHAR FAR *)g_mnet->bssid, 6);
+            if (tx0((UCHAR FAR *)nh, 24, (UCHAR FAR *)0, 0, TXF_FIXED, AP_WCID) == 0)
+               g_tim_null++;
+         }
+      }
+   }
    /* receive security counters, data frames only: [0] unicast, [1] group-addressed */
    if ((b[h] & 0x0C) == 0x08) {
       UCHAR m = (UCHAR)(b[h + 4] & 1);
@@ -169,7 +221,6 @@ void mt_txs(UCHAR FAR *b, USHORT len)
 }
 
 /* ---- transmit on ring 0 ---------------------------------------------------------------------------------------- */
-#define TXF_FIXED    0x0100                         /* basic rate (management, EAPOL)                       */
 
 static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT flags, UCHAR wcid)
 {
@@ -479,6 +530,7 @@ int hw_join_prepare(net_t *n)
       return -1;
    roc_release();
    g_mnet = n;
+   g_tim_bcn = g_tim_set = g_tim_null = 0;
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
       dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);
