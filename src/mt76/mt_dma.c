@@ -236,7 +236,7 @@ USHORT mt_mcu(UCHAR cid, USHORT plen, int wait)
       put16(b + 34, cid);
       b[37] = 0xA0;                                 /* pkt_type                                            */
       b[39] = seq;
-      b[42] = 0x07;                                 /* option: ACK | UNI | SET                             */
+      b[43] = 0x07;                                 /* option: ACK | UNI | SET (byte 42 is s2d_index)      */
    } else {
       put16(b + 32, (USHORT)(total - 32));          /* mcu_txd: len, pq_id                                 */
       put16(b + 34, 0x8000);
