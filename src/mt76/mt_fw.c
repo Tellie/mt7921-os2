@@ -350,7 +350,7 @@ static int init_cmds(void)
       return fail("MT7921: SET_RX_PATH, status", st);
 
    if (mt_dev_bss_init())
-      return fail("MT7921: DEV_INFO / BSS_INFO failed", 0UL);
+      return fail("MT7921: DEV_INFO / BSS_INFO not taken by the DMA", 0UL);
    return 0;
 }
 
@@ -459,4 +459,8 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
    ps(" RXFRAMES="); ph(g_rx_frames, 4); ps(" RXEVT="); ph(g_rx_events, 4); ps(" RXOTHER="); ph(g_rx_other, 4);
    ps(" TXFRAMES="); ph(g_tx_frames, 4); ps(" TXFULL="); ph(g_tx_full, 4);
    ps(" ROC="); ps(g_roc_held ? "held" : "-"); nl();
+   ps("DEVINFO="); ph(g_uni_st[0], 4); ps("/"); ph(g_uni_val[0], 8);
+   ps(" BSSINFO="); ph(g_uni_st[1], 4); ps("/"); ph(g_uni_val[1], 8);
+   ps(" LASTUNI="); ph(g_uni_st[3], 4); ps("/"); ph(g_uni_val[3], 8);
+   ps("  (status FFFF = no answer, FFFE = not sent; value = firmware status)"); nl();
 }

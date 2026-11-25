@@ -21,37 +21,53 @@ static UCHAR  g_roc_token;
 static net_t *g_mnet;                               /* the AP of the current join                         */
 static USHORT g_txlk;
 
-static USHORT uni_status(void)                      /* UNI answers: le32 status at +40                     */
+USHORT g_uni_st[4];                                 /* DEV_INFO, BSS_INFO at bring-up; last join command   */
+ULONG  g_uni_val[4];
+
+/* send a UNI command and wait; answer: le32 status at +40 (mt76_connac2_mcu_uni_event, after the 36-byte rxd).
+ * Returns 0 = OK, else the McuSend status (ST_NOTX / ST_NOEVT) or 1 = the firmware reported an error.  */
+static USHORT uni_slot(UCHAR cid, USHORT plen, USHORT slot)
 {
-   return (USHORT)((g_evtlen >= 44 && evt32(40) != 0UL) ? 1 : 0);
+   USHORT st;
+   ULONG v = 0;
+
+   g_kind = MK_UNI;
+   st = mt_mcu(cid, plen, 1);
+   if (st < ST_NOTX)
+      v = (g_evtlen >= 44) ? evt32(40) : 0xFFFFFFFEUL;
+   g_uni_st[slot] = st;
+   g_uni_val[slot] = v;
+   if (st >= ST_NOTX)
+      return st;
+   return (USHORT)((v != 0UL && v != 0xFFFFFFFEUL) ? 1 : 0);
 }
 
 static USHORT uni(UCHAR cid, USHORT plen)
 {
-   USHORT st;
-
-   g_kind = MK_UNI;
-   st = mt_mcu(cid, plen, 1);
-   if (st >= ST_NOTX)
-      return st;
-   return uni_status();
+   return uni_slot(cid, plen, 3);
 }
 
 /* ---- bring-up objects: DEV_INFO_UPDATE + BSS_INFO_UPDATE (basic, disconnected) --------------------------- */
 int mt_dev_bss_init(void)
 {
+   USHORT st;
+
    pl_zero(16);
    pl16(6, 12);                                     /* DEV_INFO_ACTIVE tlv                                 */
    g_pl[8] = 1;
    fmemcpy((UCHAR FAR *)g_pl + 10, (UCHAR FAR *)g_hw_mac, 6);
-   if (uni(MCU_UNI_CMD_DEV_INFO_UPDATE, 16))
+   st = uni_slot(MCU_UNI_CMD_DEV_INFO_UPDATE, 16, 0);
+   if (st == ST_NOTX)
       return -1;
    pl_zero(36);
    pl16(6, 32);                                     /* UNI_BSS_INFO_BASIC                                  */
    g_pl[8] = 1;                                     /* active                                              */
    pl32(12, 0x00010001UL);                          /* CONNECTION_INFRA_STA                                */
    g_pl[16] = 1;                                    /* disconnected                                        */
-   return uni(MCU_UNI_CMD_BSS_INFO_UPDATE, 36) ? -1 : 0;
+   st = uni_slot(MCU_UNI_CMD_BSS_INFO_UPDATE, 36, 1);
+   /* like the stand-alone driver (whose scans worked): only a command the DMA did not take is fatal;
+    * a missing answer or an error status is shown in the status text (DEVINFO= / BSSINFO=) */
+   return st == ST_NOTX ? -1 : 0;
 }
 
 /* ---- receive ------------------------------------------------------------------------------------------------- */
@@ -375,7 +391,7 @@ int hw_join_prepare(net_t *n)
    g_mnet = n;
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
-      dd_err("MT7921: STA_REC (AP, NONE) failed", 0UL);
+      dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);
       return -1;
    }
    g_roc_token++;
@@ -395,9 +411,9 @@ int hw_join_complete(void)
 {
    if (!g_mnet)
       return -1;
-   if (bss_info(1)) { dd_err("MT7921: BSS_INFO (connected) failed", 0UL); return -1; }
-   if (sta_rec(2, g_jaid)) { dd_err("MT7921: STA_REC (AP, ASSOC) failed", 0UL); return -1; }
-   if (vif_sta_rec()) { dd_err("MT7921: STA_REC (own BSS) failed", 0UL); return -1; }
+   if (bss_info(1)) { dd_err("MT7921: BSS_INFO (connected) failed", g_uni_val[3]); return -1; }
+   if (sta_rec(2, g_jaid)) { dd_err("MT7921: STA_REC (AP, ASSOC) failed", g_uni_val[3]); return -1; }
+   if (vif_sta_rec()) { dd_err("MT7921: STA_REC (own BSS) failed", g_uni_val[3]); return -1; }
    if (!g_mnet->sec)
       roc_release();                                /* open network: no keys to wait for                   */
    return 0;
