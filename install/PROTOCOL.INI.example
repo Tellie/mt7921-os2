@@ -1,0 +1,28 @@
+[PROT_MAN]
+
+   DRIVERNAME = PROTMAN$
+
+[IBMLXCFG]
+
+   TCPIP_NIF = TCPIP.NIF
+   MT7921_NIF = MT7921.NIF
+
+[TCPIP_NIF]
+
+   DriverName = TCPIP$
+   Bindings = MT7921_NIF
+
+[MT7921_NIF]
+
+   DriverName = WRND32$
+
+   ; Your adapter's MAC (HWMAC= in the status text; MTMAC.CMD writes it here). Recommended: TCP/IP copies the
+   ; address at bind time, which can be before the firmware has run and the driver knows the real one.
+   NETADDRESS = "000000000000"
+
+   ; Optional: join only an access point on this primary channel (testing).
+   ; CHANNEL = 6
+
+   ; The options of Paul Smedley's iwlwifi driver (STREAMS, MAXWIDTH, AMPDU, AGGTX, RATEADAPT, POWERSAVE) are
+   ; parsed by the shared station code, but the MT7921 back end does not use them yet: it runs 20 MHz,
+   ; without aggregation and without power save.

@@ -1,133 +1,68 @@
-# MT7921.OS2 – MediaTek MT7921 wifi driver for OS/2 (ArcaOS)
+# MT7921 WiFi driver for OS/2 and ArcaOS
 
-Target hardware: MediaTek MT7921 (PCI 14C3:7961), AzureWave module
-(1A3B:4682), as fitted in the HP Victus 15-fa0xxx.
+A native driver for the **MediaTek MT7921** (Filogic 330, PCI `14C3:7961`, also sold as AMD RZ608/RZ616) PCIe
+WiFi adapter, written on an HP Victus 15-fa0xxx (subsystem `1A3B:4682`).
 
-The driver presents itself as a GenMac-compatible `WRND32$` device, so
-the existing [wpa_supplicant-os2](https://github.com/psmedley/wpa_supplicant-os2)
-can drive it without changes. See `src/wrnd_ioctl.h` for the interface.
+Since v0.30 the driver has two parts:
 
-## Roadmap
+* **The OS/2 side** (`src/os2/`, `src/wlan/`) is taken unchanged (apart from names) from Paul Smedley's
+  [iwlwifi driver for OS/2](https://github.com/psmedley/iwlwifi):
+  * a **GenMAC-compatible device** (`\DEV\WRND32$`, DosDevIOCtl category 99h OIDs), so the ArcaOS Wireless LAN
+    Monitor and [wpa_supplicant](https://github.com/psmedley/wpa_supplicant-os2) can drive it;
+  * an **NDIS 2.0.1 MAC** (`MT7921_NIF`), so TCP/IP binds to it as `lanN`;
+  * the station: scan table, authentication, association, WPA2 keys, EAPOL, Ethernet <-> 802.11.
+* **The chip side** (`src/mt76/`) is the MediaTek back end behind Paul's `wlan/hw.h`, following Linux
+  **mt76** (`mt7921/`, `mt792x_*`, `mt76_connac*`). It grew out of the stand-alone MT7921.OS2 v0.01-v0.20, which is
+  kept in `old/` for reference.
 
-| Phase | Goal | Status |
-|---|---|---|
-| 1 | PCI detection, `WRND32$`, wpa_supplicant probe OIDs | done (v0.01) |
-| 2 | Enable PCI memory, map BAR0, fw/driver-own handshake, read chip ID | done (v0.04) |
-| 3a | ROM patch from disk, bus master, WFDMA rings, MCU messages, ROM patch download | done (v0.10) |
-| 3b | RAM code download, FW_START, N9 ready | done (v0.11) |
-| 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | done (v0.13) |
-| 4a | EFUSE mode, MAC enable, channel domain, RX path, station interface, HW scan, beacon list | done (v0.16) |
-| 4b | Scan via OID_802_11_BSSID_LIST_SCAN / BSSID_LIST for wpa_supplicant (RSSI, IEs, 32 networks) | **this version (v0.17)** |
-| 5 | Connect: auth/assoc, EAPOL, keys | |
-| 4 | MCU commands: read MAC from EEPROM, hw_scan → `BSSID_LIST` | |
-| 5 | Mini-MLME: auth/assoc, EAPOL via 802_1X_RX/TX, keys via ADD_KEY | |
-| 6 | NDIS 2.0.1 MAC: PROTMAN binding, 802.3 ⇄ 802.11 data path for TCP/IP | |
+Paul asked to keep the brands apart, so this is a separate driver that uses his code as its base, not a back end
+inside his repository.
 
-## Build
+## Status (v0.30)
 
-Requires OpenWatcom (1.9 or 2.0) for the driver, gcc for the test tool.
+Proven on the hardware with the stand-alone driver (v0.01-v0.20): ROM patch and RAM firmware load, real MAC from
+the chip, warm-reboot reattach to the running firmware, hardware scan on 2.4 and 5 GHz, Open System authentication
+with an access point.
 
-```
-%WATCOM%\owsetenv.cmd
-sh build.sh
-```
+New in v0.30 and **not tested on hardware yet**: everything in the new structure, plus association, BSS/STA
+records after association, CCMP keys (pairwise and group) in the firmware, data frames in both directions, the
+interrupt (with polled fallback) and the NDIS binding.
 
-Output goes to `out\`: `mt7921.os2`, `mt7921.map`, `wrndtest.exe`.
+Not done: 40/80 MHz, HT/VHT rates for transmit (legacy rates only), aggregation, power save, WPA3/TKIP/WEP.
 
-## Install (phase 1, safe: no hardware access)
+## Install (for testing)
 
-Add to CONFIG.SYS (after the existing network drivers):
+1. Copy `MT7921.OS2` (from `src/` after building, or `bin/` in the release zip) and `install\MT7921.NIF` to
+   `C:\IBMCOM\MACS`.
+2. Copy the two firmware files from linux-firmware `mediatek/` to `C:\IBMCOM\MACS\MT7921\`:
+   `WIFI_MT7961_patch_mcu_1_2_hdr.bin` and `WIFI_RAM_CODE_MT7961_1.bin`.
+3. `CONFIG.SYS`: `DEVICE=C:\IBMCOM\MACS\MT7921.OS2` (only one `WRND32$` driver can be loaded: remove the line of
+   the old stand-alone MT7921.OS2, GenMAC or any other WRND32$ driver).
+4. `PROTOCOL.INI`: bind `MT7921_NIF` as in `install\PROTOCOL.INI.example`.
+5. `STARTUP.CMD`: the `copy /b` line from `install\STARTUP.CMD.example` (patch first, then the RAM code, as one
+   copy with `+`).
+6. Reboot. `copy \DEV\WRND32$ con` prints the driver state (`STATE=0064 READY`, `HWMAC=`...). `MTMAC.CMD` writes
+   the adapter's MAC into PROTOCOL.INI.
+7. Connect with wpa_supplicant (`wpa_supplicant -i lan1 -c wpa.conf`) or the Wireless LAN Monitor.
 
-```
-DEVICE=C:\IBMCOM\MACS\MT7921.OS2 /LAN:1
-```
+## Building
 
-Options: `/LAN:n` – LAN number reported to wpa_supplicant (default 1),
-`/Q` – no boot messages, `/NOMEM` – do not enable PCI memory decoding.
+Linux (cross): Open Watcom 2.0 (`binl64` on the PATH, `WATCOM` set) and NASM, then `make -C src`.
+OS/2: `build.cmd` in `src` (Open Watcom 2.0 + NASM). The driver is `src\MT7921.OS2`.
 
-At boot you should see something like:
-
-```
-MT7921.OS2 v0.01 - MediaTek MT7921 wireless (phase 1)
-MT7921.OS2: found at PCI 04:00.0  subsys 1A3B:4682
-MT7921.OS2: BAR0=0000000080600000 IRQ=12 CMD=0000 as lan1
-```
-
-## Firmware (phase 3a)
-
-Get `WIFI_MT7961_patch_mcu_1_2_hdr.bin` and `WIFI_RAM_CODE_MT7961_1.bin` from linux-firmware
-(https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/mediatek)
-and put it in a `MT7921` folder next to the driver:
+## Layout
 
 ```
-C:\IBMCOM\MACS\MT7921.OS2
-C:\IBMCOM\MACS\MT7921\WIFI_MT7961_patch_mcu_1_2_hdr.bin
+src/os2/    OS/2 plumbing (Paul Smedley): device header, DevHelp glue, strategy routine, NDIS MAC, GenMAC OIDs,
+            DMA memory, PCI, status text
+src/wlan/   the chip-independent station (Paul Smedley) and hw.h, the contract a chip back end implements
+src/mt76/   the MediaTek MT7921 back end: registers, WFDMA rings, MCU messages, firmware, scan, join, keys, TX/RX
+install/    NIF, PROTOCOL.INI and STARTUP.CMD examples, MTMAC.CMD
+old/        the stand-alone MT7921.OS2 v0.01-v0.20 and its test tool wrndtest
 ```
 
-The driver reads it at boot and reports `... loaded (0x...... bytes)`.
+## Licence
 
-## Test
-
-Phase 2 hardware probe (runs only on request, never at boot):
-
-```
-wrndtest /hw
-```
-
-Expected: `result 0 = OK`, chip ID ending in `7961`.
-
-Phase 3a ROM patch download (the system pauses for a few seconds):
-
-```
-wrndtest /fw
-```
-
-After a warm reboot the WiFi firmware is still running in the chip; since
-v0.13 `/fw` then reuses it and only sets up the host DMA again. First scan (after `/fw`, same boot):
-
-```
-wrndtest /scan
-```
-
-Expected: `OK at step 9 (done)` and a list of nearby networks.
-
-The same through the wpa_supplicant interface (loads the firmware if needed):
-
-```
-wrndtest /list
-```
-
-Expected for `/fw`: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
-(sem get 1 = the patch was already loaded). The WFSYS reset is off by
-default since v0.10 (`/x:8` turns it on; with it the WFDMA never starts).
-
-
-```
-wrndtest
-wpa_supplicant -i lan1 -c wpa.conf -dd
-```
-
-`wrndtest` must report ISWIRELESS=1, version 0x00010008 and the PCI data.
-Since v0.18 wpa_supplicant accepts `lan1`, scans and lists the networks
-with signal strength and RSN data. Connecting does not work yet (phase 5).
-
-Phase 5a authentication test (one Open System auth frame, no association):
-
-```
-wrndtest /auth:MyNetwork
-```
-
-Expected: `ROC ... grant yes`, `auth frame taken by DMA` and
-`response alg 0, seq 2, status 0 => AUTHENTICATED`.
-
-Phase 5b connect test (authentication + association):
-
-```
-wrndtest /conn:MyNetwork
-```
-
-Expected: `assoc ... status 0, AID n => ASSOCIATED` and `connected YES`.
-wpa_supplicant uses the same code: setting the SSID makes the driver
-connect, `OID_802_11_BSSID` reports the AP, EAPOL frames go through
-`802_1X_RX`/`802_1X_TX`. Keys are not installed yet (phase 5c), so
-after the 4-way handshake there is no data traffic yet.
+GPL-2.0-only (`COPYING`), because of the OS/2 side from the iwlwifi driver. The mt76 code the back end follows is
+ISC licensed and compatible with that. The firmware is MediaTek's, distributed separately under its own licence.
+See `PROVENANCE.md`.

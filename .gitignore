@@ -1,5 +1,8 @@
 # build output
 out/
+obj/
+*.OS2
+*.MAP
 *.obj
 *.o
 *.os2

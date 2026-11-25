@@ -1,0 +1,10 @@
+@echo off
+rem STARTUP.CMD lines for the MT7921 OS/2 driver (MediaTek MT7921, PCI 14C3:7961).
+rem The driver cannot read files during boot, so the two firmware files from linux-firmware
+rem (mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin and mediatek/WIFI_RAM_CODE_MT7961_1.bin) are copied
+rem into it once per boot, the patch FIRST, as one stream:
+copy /b C:\IBMCOM\MACS\MT7921\WIFI_MT7961_patch_mcu_1_2_hdr.bin + C:\IBMCOM\MACS\MT7921\WIFI_RAM_CODE_MT7961_1.bin \DEV\WRND32$ > nul
+rem The adapter starts as soon as the files are in (a few seconds), so the driver knows its real MAC
+rem before the protocol stack binds. Keep this line BEFORE anything that starts networking.
+rem The state at any time:        copy \DEV\WRND32$ con
+rem To retry a failed start:      echo up > \DEV\WRND32$
