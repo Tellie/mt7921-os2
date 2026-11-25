@@ -24,6 +24,8 @@ static UCHAR  g_pid = 2;                            /* TX status packet ids 3..6
 UCHAR  g_pidfc[64];                                 /* frame control byte of the frame sent with that pid  */
 UCHAR  g_txs_fc[8], g_txs_err[8];                   /* the last 8 TX status reports                        */
 USHORT g_txs_n;
+USHORT g_txs_dok, g_txs_dbad, g_txs_mok, g_txs_mbad;  /* data / other frames: ACKed, not ACKed            */
+USHORT g_txe_state, g_txe_len, g_txe_lock;          /* tx0 refusals: not running, too long, busy           */
 
 USHORT g_uni_st[4];                                 /* DEV_INFO, BSS_INFO at bring-up; last join command   */
 ULONG  g_uni_val[4];
@@ -137,6 +139,11 @@ void mt_txs(UCHAR FAR *b, USHORT len)
       g_txs_fc[k] = g_pidfc[pid];
       g_txs_err[k] = (UCHAR)(b[p + 2] & 0x07);
       g_txs_n++;
+      if ((g_pidfc[pid] & 0x0C) == 0x08) {
+         if (g_txs_err[k]) g_txs_dbad++; else g_txs_dok++;
+      } else {
+         if (g_txs_err[k]) g_txs_mbad++; else g_txs_mok++;
+      }
    }
 }
 
@@ -151,11 +158,12 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    ULONG q, w;
    int fixed = (ftype != 2) || (flags & (HWTX_EAPOL | TXF_FIXED));
 
-   if (!g_mt_on || n > TX_SLOT - 64 || hlen < 24)
-      return -1;
+   if (!g_mt_on)                  { g_txe_state++; return -1; }
+   if (n > TX_SLOT - 64 || hlen < 24) { g_txe_len++; return -1; }
    fl = rt_irq_save();
    if (rt_lock_acquire(&g_txlk, (USHORT)(rt_cpu_id() + 1))) {
       rt_irq_restore(fl);
+      g_txe_lock++;
       return -2;
    }
    next = (USHORT)((g_rtx0.head + 1) % g_rtx0.n);
@@ -186,12 +194,10 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    put32(b + 12, w);
    if (fixed)                                       /* FIXED_BW, CCK 1M (2.4 GHz) / OFDM 6M (5 GHz)         */
       put32(b + 24, 0x00000004UL | ((g_jch > 14 ? 0x4BUL : 0x00UL) << 16));
-   if (fixed) {                                     /* management, EAPOL: ask for a TX status report       */
-      if (++g_pid >= 64)
-         g_pid = 3;
-      g_pidfc[g_pid] = fc;
-      put32(b + 20, 0x00000400UL | g_pid);          /* dw5: TX_STATUS_HOST, PID                            */
-   }
+   if (++g_pid >= 64)                               /* every frame: ask for a TX status report             */
+      g_pid = 3;
+   g_pidfc[g_pid] = fc;
+   put32(b + 20, 0x00000400UL | g_pid);             /* dw5: TX_STATUS_HOST, PID                            */
    put32(b + 28, (24UL << 11) | ((ULONG)stype << 16) | ((ULONG)ftype << 20));
    put16(b + 32, (USHORT)(0x8000 | (slot + 1)));    /* hw TXP: msdu_id[0] = token                          */
    put32(b + 40, g_txslot[slot].phys + 64);         /* ptr[0].buf0                                         */
@@ -418,6 +424,32 @@ static void set_timing(UCHAR ch, int short_slot)
    mt_clr(0x00020C80UL, 0x00000300UL);
 }
 
+/* mt7921_mcu_set_tx: EDCA of the four access categories (mac80211's WMM defaults for OFDM), CE SET_EDCA_PARMS.
+ * Record order as Linux to_aci[] = { 1, 0, 2, 3 } for VO, VI, BE, BK: VI, VO, BE, BK.                       */
+static void set_edca(void)
+{
+   static const USHORT par[4][4] = {        /* cw_min, cw_max, txop, aifs in record order                       */
+      {  7,   15, 94, 2 },                  /* VI                                                               */
+      {  3,    7, 47, 2 },                  /* VO                                                               */
+      { 15, 1023,  0, 3 },                  /* BE                                                               */
+      { 15, 1023,  0, 7 }                   /* BK                                                               */
+   };
+   USHORT i;
+
+   pl_zero(44);
+   for (i = 0; i < 4; i++) {
+      pl16((USHORT)(i * 10 + 0), par[i][0]);
+      pl16((USHORT)(i * 10 + 2), par[i][1]);
+      pl16((USHORT)(i * 10 + 4), par[i][2]);
+      pl16((USHORT)(i * 10 + 6), par[i][3]);
+   }
+   g_pl[40] = 0;                                    /* bss_idx                                             */
+   g_pl[41] = has_wmm();                            /* qos                                                 */
+   g_pl[42] = 0;                                    /* wmm_idx                                             */
+   g_setq = MCU_Q_SET;
+   (void)mt_mcu(MCU_CE_CMD_SET_EDCA_PARMS, 44, 0);
+}
+
 int hw_join_prepare(net_t *n)
 {
    USHORT cap = get16((UCHAR FAR *)n->ie + 10);
@@ -457,6 +489,7 @@ int hw_join_complete(void)
    pl16(4, 21); pl16(6, 8);                         /* UNI_BSS_INFO_PS                                     */
    g_pl[8] = 0;                                     /* ps_state 0: awake                                   */
    (void)uni(MCU_UNI_CMD_BSS_INFO_UPDATE, 12);
+   set_edca();
    if (!g_mnet->sec)
       roc_release();                                /* open network: no keys to wait for                   */
    return 0;

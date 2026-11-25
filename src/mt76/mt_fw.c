@@ -475,6 +475,11 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       }
       ps("  total="); ph(g_txs_n, 4);
       nl();
+      ps("TXSUM data ACKed="); ph(g_txs_dok, 4); ps(" data NOT ACKed="); ph(g_txs_dbad, 4);
+      ps(" other ACKed="); ph(g_txs_mok, 4); ps(" other NOT ACKed="); ph(g_txs_mbad, 4);
+      ps("  refused: not running="); ph(g_txe_state, 4); ps(" too long="); ph(g_txe_len, 4);
+      ps(" busy="); ph(g_txe_lock, 4); ps(" ring full="); ph(g_tx_full, 4);
+      nl();
       ps("UNIHIST (oldest first; cid 01 DEV 02 BSS 03 STA_REC, tag, status/firmware):");
       for (i = 0; i < n; i++) {
          USHORT k = (USHORT)((g_uh_n - n + i) & 7);

@@ -74,6 +74,7 @@ extern DMA  g_cmdbuf, g_bounce, g_txslot[TX0_N];
 #define MCU_CMD_PATCH_FINISH            0x07
 #define MCU_CMD_PATCH_SEM               0x10
 #define MCU_CE_CMD_START_HW_SCAN        0x03
+#define MCU_CE_CMD_SET_EDCA_PARMS       0x1D
 #define MCU_CE_CMD_SET_CHAN_DOMAIN      0x0F
 #define MCU_CE_CMD_GET_NIC_CAPAB        0x8A
 #define MCU_EXT_CMD_EFUSE_BUFFER_MODE   0x21
@@ -137,7 +138,7 @@ void   mt_rx_frame(UCHAR FAR *b, USHORT len);   /* one RX buffer with a frame (R
 extern USHORT g_roc_held;
 void   mt_txs(UCHAR FAR *b, USHORT len);
 extern UCHAR  g_txs_fc[8], g_txs_err[8];
-extern USHORT g_txs_n;
+extern USHORT g_txs_n, g_txs_dok, g_txs_dbad, g_txs_mok, g_txs_mbad, g_txe_state, g_txe_len, g_txe_lock;
 extern USHORT g_uni_st[4];                      /* 0 DEV_INFO, 1 BSS_INFO, 3 last UNI command          */
 extern ULONG  g_uni_val[4];
 extern UCHAR  g_uh_cid[8], g_uh_tag[8];
