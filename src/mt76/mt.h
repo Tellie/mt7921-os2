@@ -136,6 +136,9 @@ extern USHORT g_reattached;
 int    mt_dev_bss_init(void);                   /* DEV_INFO + BSS_INFO (disconnected)                    */
 void   mt_rx_frame(UCHAR FAR *b, USHORT len);   /* one RX buffer with a frame (RXD + 802.11)             */
 extern USHORT g_roc_held;
+extern USHORT g_rxs[2][6], g_rxs_n;
+extern ULONG  g_rxs_d1[4];
+extern UCHAR  g_rxs_fc[4];
 void   mt_txs(UCHAR FAR *b, USHORT len);
 extern UCHAR  g_txs_fc[8], g_txs_err[8];
 extern USHORT g_txs_n, g_txs_dok, g_txs_dbad, g_txs_mok, g_txs_mbad, g_txe_state, g_txe_len, g_txe_lock;

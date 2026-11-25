@@ -15,7 +15,7 @@
 #include "os2dd.h"
 
 #define DRV_NAME        "MT7921"
-#define DRV_VERSION     "0.37"
+#define DRV_VERSION     "0.38"
 #define DRV_BUILD       "mt76 back end, phase 6"
 #define DRV_NIF         "MT7921_NIF"           /* PROTOCOL.INI section, NDIS module name                     */
 #define DRV_NIF_LC      "mt7921_nif"           /* the same in lower case (PROTOCOL.INI parser)                */

@@ -483,6 +483,19 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps("  refused: not running="); ph(g_txe_state, 4); ps(" too long="); ph(g_txe_len, 4);
       ps(" busy="); ph(g_txe_lock, 4); ps(" ring full="); ph(g_tx_full, 4);
       nl();
+      for (i = 0; i < 2; i++) {
+         USHORT j;
+         static const char *nm[6] = { " FCSerr=", " ICVerr=", " nokey=", " decrypted=", " prot-undecr=", " plain=" };
+
+         ps(i ? "RXSEC group:  " : "RXSEC unicast:");
+         for (j = 0; j < 6; j++) { ps(nm[j]); ph(g_rxs[i][j], 4); }
+         nl();
+      }
+      if (g_rxs_n) {
+         ps("RXSEC first bad (rxd1/fc1):");
+         for (i = 0; i < g_rxs_n; i++) { ps(" "); ph(g_rxs_d1[i], 8); ps("/"); ph(g_rxs_fc[i], 2); }
+         nl();
+      }
       ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");
       for (i = 0; i < 6; i++) { ph(g_jbssid[i], 2); if (i < 5) ps(":"); }
       ps("), count="); ph(g_d0_n, 4); nl();

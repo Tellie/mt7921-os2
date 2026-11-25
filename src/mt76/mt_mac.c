@@ -17,6 +17,10 @@
 #include "mt.h"
 
 USHORT g_roc_held;
+USHORT g_rxs[2][6];                                 /* RX security counters, see mt_rx_frame               */
+ULONG  g_rxs_d1[4];
+UCHAR  g_rxs_fc[4];
+USHORT g_rxs_n;
 static UCHAR  g_roc_token;
 static net_t *g_mnet;                               /* the AP of the current join                         */
 static USHORT g_txlk;
@@ -96,8 +100,6 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
 
    if (!g_hw_ready || len < 48)
       return;
-   if (b[7] & 0x0A)                                 /* rxd1 FCS error / ICV error                          */
-      return;
    if (g & 0x40) h += 16;                           /* group 4                                             */
    if (g & 0x08) h += 16;                           /* group 1                                             */
    if (g & 0x10) h += 8;                            /* group 2                                             */
@@ -114,6 +116,24 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
    if (b[9] & 0x20)                                 /* header translated: not configured, not expected     */
       return;
    if (h + 24 > len)
+      return;
+   /* receive security counters, data frames only: [0] unicast, [1] group-addressed */
+   if ((b[h] & 0x0C) == 0x08) {
+      UCHAR m = (UCHAR)(b[h + 4] & 1);
+
+      if (b[7] & 0x08)                 g_rxs[m][0]++;   /* FCS error                                           */
+      else if (b[7] & 0x02)            g_rxs[m][1]++;   /* ICV error: decryption failed                        */
+      else if (b[6] & 0x80 || b[7] & 0x01) g_rxs[m][2]++;   /* CM / CLM: no key for it                         */
+      else if (sec)                    g_rxs[m][3]++;   /* decrypted                                           */
+      else if (b[h + 1] & 0x40)        g_rxs[m][4]++;   /* protected, not decrypted, no error bit              */
+      else                             g_rxs[m][5]++;   /* plain                                               */
+      if (g_rxs_n < 4 && (b[7] & 0x0A || (b[h + 1] & 0x40 && !sec))) {
+         g_rxs_d1[g_rxs_n] = get32(b + 4);             /* rxd1 of the first bad ones                          */
+         g_rxs_fc[g_rxs_n] = b[h + 1];
+         g_rxs_n++;
+      }
+   }
+   if (b[7] & 0x0A)                                 /* rxd1 FCS error / ICV error                          */
       return;
    if (v) {
       r0 = b[v]; r1 = b[v + 1];
