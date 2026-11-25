@@ -29,6 +29,8 @@ net_t *g_jnet;
 USHORT g_rx_mgmt[16];
 USHORT g_rx_8023, g_tx_8023;
 USHORT g_rx_eapol, g_rx_ndis, g_rx_nobuf, g_rx_data, g_rx_drop[8], g_tx_data, g_tx_busy;
+UCHAR  g_d0_fc[4][2], g_d0_a[4][18];               /* last data frames dropped as "not from our AP"      */
+USHORT g_d0_n;
 
 static USHORT g_auth_rx, g_auth_status, g_assoc_rx, g_assoc_status, g_assoc_aid, g_assoc_caps, g_assoc_reslen;
 static UCHAR  g_assoc_res[192];
@@ -863,6 +865,12 @@ void sta_rx_frame(UCHAR FAR *f, USHORT len, UCHAR chan, short rssi, USHORT rxfla
    g_rx_data++;
    if (!g_joined || (fc1 & 0x03) != 0x02 || !mac_eq(f + 10, (UCHAR FAR *)g_jbssid)) {
       g_rx_drop[0]++;                                  /* not From-DS from our AP                           */
+      if (g_joined && len >= 24) {                     /* MT7921: keep the last 4 for the status text       */
+         UCHAR k = (UCHAR)(g_d0_n & 3);
+         g_d0_fc[k][0] = fc0; g_d0_fc[k][1] = fc1;
+         fmemcpy((UCHAR FAR *)g_d0_a[k], f + 4, 18);   /* addr1, addr2, addr3                               */
+         g_d0_n++;
+      }
       return;
    }
    if (fc0 & 0x40) {                                   /* null data / QoS null                              */

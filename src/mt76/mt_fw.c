@@ -14,6 +14,9 @@
 #include "drv.h"
 #include "mt.h"
 
+extern UCHAR  g_d0_fc[4][2], g_d0_a[4][18];
+extern USHORT g_d0_n;
+
 USHORT g_hw_ready, g_hw_failed, g_hw_state;
 UCHAR  g_hw_mac[6];
 UCHAR  g_hw_nss = 2;
@@ -480,6 +483,19 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps("  refused: not running="); ph(g_txe_state, 4); ps(" too long="); ph(g_txe_len, 4);
       ps(" busy="); ph(g_txe_lock, 4); ps(" ring full="); ph(g_tx_full, 4);
       nl();
+      ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");
+      for (i = 0; i < 6; i++) { ph(g_jbssid[i], 2); if (i < 5) ps(":"); }
+      ps("), count="); ph(g_d0_n, 4); nl();
+      for (i = 0; i < 4 && i < g_d0_n; i++) {
+         USHORT j;
+
+         ps("  "); ph(g_d0_fc[i][0], 2); ps(" "); ph(g_d0_fc[i][1], 2);
+         for (j = 0; j < 18; j++) {
+            if (j % 6 == 0) ps(" ");
+            ph(g_d0_a[i][j], 2);
+         }
+         nl();
+      }
       ps("UNIHIST (oldest first; cid 01 DEV 02 BSS 03 STA_REC, tag, status/firmware):");
       for (i = 0; i < n; i++) {
          USHORT k = (USHORT)((g_uh_n - n + i) & 7);
