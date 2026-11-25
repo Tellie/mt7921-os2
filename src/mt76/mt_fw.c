@@ -505,6 +505,11 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps("TIM (beacons of our AP) beacons="); ph(g_tim_bcn, 4); ps(" our-AID-set="); ph(g_tim_set, 4);
       ps(" null-sent="); ph(g_tim_null, 4); ps(" aid="); ph(g_jaid, 4); ps(" last-bitmapctl="); ph(g_tim_last, 2);
       nl();
+      ps("RXMODE (data from our AP; CCK OFDM HT-MF HT-GF VHT+) unicast=");
+      for (i = 0; i < 5; i++) { ph(g_rxm[0][i], 4); ps(" "); }
+      ps(" group=");
+      for (i = 0; i < 5; i++) { ph(g_rxm[1][i], 4); ps(" "); }
+      ps(" FWHT="); ph(g_fwht, 1); nl();
       ps("ECHO (our own broadcasts sent back by the AP = it decrypted our frames)="); ph(g_echo, 4);
       ps(" AP-WMM="); ph(g_jnet ? g_jnet->wmm : 0xFF, 2); nl();
       ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");

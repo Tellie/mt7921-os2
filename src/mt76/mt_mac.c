@@ -21,6 +21,7 @@ USHORT g_rxs[2][6];                                 /* RX security counters, see
 ULONG  g_rxs_d1[4];
 UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
+USHORT g_rxm[2][5];                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
 USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last, g_echo;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
 static ULONG g_tim_t;
 static UCHAR  g_roc_token;
@@ -108,7 +109,7 @@ static int same6(UCHAR FAR *a, UCHAR FAR *b)
 
 void mt_rx_frame(UCHAR FAR *b, USHORT len)
 {
-   USHORT h = 24, v = 0, fl = 0;
+   USHORT h = 24, v = 0, fl = 0, g3 = 0;
    UCHAR g = b[5], sec = (UCHAR)(b[6] & 0x1F), r0, r1;
    short rssi = -127;
 
@@ -118,6 +119,7 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
    if (g & 0x08) h += 16;                           /* group 1                                             */
    if (g & 0x10) h += 8;                            /* group 2                                             */
    if (g & 0x20) {                                  /* group 3: RXV, RCPI at +4                            */
+      g3 = h;
       v = (USHORT)(h + 4);
       h += 8;
       if (g & 0x80) {                               /* group 5                                             */
@@ -172,6 +174,12 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
    /* receive security counters, data frames only: [0] unicast, [1] group-addressed */
    if ((b[h] & 0x0C) == 0x08) {
       UCHAR m = (UCHAR)(b[h + 4] & 1);
+
+      if (g3 && g_mnet && same6(b + h + 10, (UCHAR FAR *)g_mnet->bssid)) {
+         UCHAR md = (UCHAR)(b[g3 + 3] & 0x0F);        /* P-RXV0 TX_MODE, bits 27:24                          */
+
+         g_rxm[m][md > 4 ? 4 : md]++;
+      }
 
       if (m && same6(b + h + 16, (UCHAR FAR *)g_hw_mac))
          g_echo++;                                  /* our own broadcast, sent on by the AP: it took our frame */
@@ -344,12 +352,17 @@ static UCHAR has_wmm(void) { return (UCHAR)(g_mnet && g_mnet->wmm); }
 /* mt7921_mcu_sta_update for the AP: BASIC, PHY, RA, STATE, WTBL{GENERIC, RX, HDR_TRANS} */
 static USHORT sta_rec(UCHAR state, USHORT aid)
 {
-   USHORT p;
+   USHORT p, tlvs = 5, ht = (USHORT)(g_fwht && state && g_jht), cap = 0;
    UCHAR g5 = (UCHAR)(g_mnet->ch > 14);
 
-   pl_zero(120);
+   if (ht) {                                        /* mac80211's sta ht_cap: the AP's, limited to ours    */
+      cap = (USHORT)((g_jhtcap & 0x000C) | (g_jhtcap & 0x0020));   /* SM power save, short GI 20       */
+      if (g_j40)
+         cap |= (USHORT)(g_jhtcap & 0x0042);        /* 40 MHz, short GI 40                                 */
+      tlvs++;
+   }
+   pl_zero(160);
    g_pl[1] = AP_WCID;                               /* sta_req_hdr: bss 0, wlan_idx_lo                     */
-   pl16(2, 5);                                      /* tlv_num                                             */
    g_pl[4] = 1;                                     /* is_tlv_append                                       */
    p = 8;                                           /* STA_REC_BASIC                                       */
    pl16(p, 0); pl16(p + 2, 20);
@@ -359,21 +372,33 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
    pl16(p + 10, state ? aid : 0);
    fmemcpy((UCHAR FAR *)g_pl + p + 12, (UCHAR FAR *)g_mnet->bssid, 6);
    pl16(p + 18, state ? 1 : 3);                     /* EXTRA_INFO_VER (| NEW)                              */
-   p += 20;                                         /* STA_REC_PHY                                         */
-   pl16(p, 0x15); pl16(p + 2, 12);
+   p += 20;
+   if (ht) {                                        /* STA_REC_HT                                          */
+      pl16(p, 9); pl16(p + 2, 8);
+      pl16(p + 4, cap);
+      p += 8;
+   }
+   pl16(p, 0x15); pl16(p + 2, 12);                  /* STA_REC_PHY                                         */
    pl16(p + 4, g5 ? 0x0015 : 0x000F);               /* basic rates                                         */
-   g_pl[p + 6] = (UCHAR)(g5 ? 0x08 : 0x03);         /* OFDM / HR_DSSS + ERP                                */
-   p += 12;                                         /* STA_REC_RA: legacy rates                            */
+   g_pl[p + 6] = (UCHAR)((g5 ? 0x08 : 0x03) | (ht ? 0x10 : 0));   /* OFDM / HR_DSSS + ERP, | HT          */
+   if (ht)
+      g_pl[p + 7] = (UCHAR)(g_ampdu_par & 0x1F);    /* A-MPDU factor, density                              */
+   p += 12;                                         /* STA_REC_RA: legacy rates, HT MCS                    */
    pl16(p, 1); pl16(p + 2, 16);
    pl16(p + 4, g5 ? 0x3FC0 : 0x3FCF);
+   if (ht) {
+      g_pl[p + 6] = g_jht_mcs[0];
+      if (g_jnss >= 2)
+         g_pl[p + 7] = g_jht_mcs[1];
+   }
    p += 16;                                         /* STA_REC_STATE                                       */
    pl16(p, 7); pl16(p + 2, 12);
    g_pl[p + 8] = state;                             /* 0 NONE, 2 ASSOC                                     */
    p += 12;                                         /* STA_REC_WTBL                                        */
-   pl16(p, 13); pl16(p + 2, 52);
+   pl16(p, 13); pl16(p + 2, (USHORT)(ht ? 64 : 52));
    g_pl[p + 4] = AP_WCID;
    g_pl[p + 5] = 1;                                 /* WTBL_RESET_AND_SET                                  */
-   pl16(p + 6, 3);
+   pl16(p + 6, (USHORT)(ht ? 4 : 3));
    p += 12;                                         /* WTBL_GENERIC                                        */
    pl16(p, 0); pl16(p + 2, 20);
    fmemcpy((UCHAR FAR *)g_pl + p + 4, (UCHAR FAR *)g_mnet->bssid, 6);
@@ -387,6 +412,14 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
    g_pl[p + 4] = 1;
    g_pl[p + 6] = 1;
    p += 8;
+   if (ht) {                                        /* WTBL_HT: ht, ldpc, af, mm                           */
+      pl16(p, 2); pl16(p + 2, 12);
+      g_pl[p + 4] = 1;
+      g_pl[p + 6] = (UCHAR)(g_ampdu_par & 3);
+      g_pl[p + 7] = (UCHAR)((g_ampdu_par >> 2) & 7);
+      p += 12;
+   }
+   pl16(2, tlvs);                                   /* tlv_num                                             */
    return uni(MCU_UNI_CMD_STA_REC_UPDATE, p);
 }
 
@@ -437,6 +470,10 @@ static USHORT bss_info(int connected)
    g_pl[29] = (UCHAR)(g5 ? 0x01 : 0x06);            /* phymode A / B|G                                     */
    pl16(30, OWN_WCID);                              /* sta_idx                                             */
    pl16(32, g5 ? 0x08 : 0x03);                      /* nonht_basic_phy                                     */
+   if (g_fwht) {                                    /* as mt76_connac_mcu_uni_add_bss: | GN / AN; ERP / OFDM index */
+      g_pl[29] = (UCHAR)(g5 ? 0x11 : 0x0E);
+      pl16(32, g5 ? 3 : 1);
+   }
    pl16(36, 15); pl16(38, 8);                       /* UNI_BSS_INFO_QBSS                                   */
    g_pl[40] = has_wmm();
    st = uni(MCU_UNI_CMD_BSS_INFO_UPDATE, 44);
@@ -534,6 +571,7 @@ int hw_join_prepare(net_t *n)
    roc_release();
    g_mnet = n;
    g_tim_bcn = g_tim_set = g_tim_null = g_echo = 0;
+   fmemset((UCHAR FAR *)g_rxm, 0, sizeof(g_rxm));
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
       dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);

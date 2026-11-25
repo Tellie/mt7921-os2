@@ -280,6 +280,8 @@ static ba_t   g_ba[BA_N];
 static DMA    g_ba_buf[BA_N];
 static UCHAR  g_ba_buf_ok[BA_N];
 UCHAR  g_ampdu = 1;
+UCHAR  g_fwht;                                         /* PROTOCOL.INI FWHT = 1: tell the firmware about HT     */
+USHORT g_jhtcap;                                       /* the AP's HT capability info (association response)  */
 USHORT g_ba_started, g_ba_refused, g_ba_stopped, g_ba_rel, g_ba_old, g_ba_dup, g_ba_to, g_ba_max, g_ba_direct;
 
 static void rx_eth(UCHAR FAR *eth, USHORT len);
@@ -1117,6 +1119,7 @@ int sta_join(UCHAR FAR *want_bssid, USHORT any)
    g_jht_mcs[0] = h ? h[2 + 3] : 0;
    g_jht_mcs[1] = h ? h[2 + 4] : 0;
    g_ampdu_par = h ? h[2 + 2] : 0;
+   g_jhtcap = h ? (USHORT)(h[2] | (h[3] << 8)) : 0;
    if (g_j80) {                                          /* the AP must confirm VHT in its response           */
       UCHAR FAR *v = find_ie((UCHAR FAR *)g_assoc_res, g_assoc_reslen, 191);
 

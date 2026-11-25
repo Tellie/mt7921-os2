@@ -39,6 +39,8 @@ extern USHORT g_jreqlen, g_jreslen, g_jcaps, g_jaid, g_jbcn, g_jdtim;
 extern UCHAR  g_jht;                            /* HT negotiated with this AP                                */
 extern UCHAR  g_j80, g_jcf0, g_jvrx[2], g_jvsgi80, g_jvexp;   /* 80 MHz (VHT) in use, centre channel, the AP's VHT rx MCS map, its short GI at 80 MHz */
 extern UCHAR  g_j40, g_jsco, g_jnss;            /* 40 MHz in use, its secondary channel offset (1 above, 3 below), spatial streams */
+extern UCHAR  g_fwht, g_ampdu_par;
+extern USHORT g_jhtcap;
 extern UCHAR  g_jht_mcs[2];                     /* the AP's HT rx MCS bytes from its association response     */
 extern UCHAR  g_jrates[12];                     /* the AP's legacy rates (association response), 802.11 units */
 extern USHORT g_jnrates;

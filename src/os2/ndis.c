@@ -543,6 +543,11 @@ static void pi_line(char *l)
          g_maxw = (UCHAR)(w >= 80 ? 2 : (w >= 40 ? 1 : 0));
          return;
       }
+      if (eqn(k, (USHORT)(e - k), "fwht")) {          /* FWHT = 0 | 1: HT in the firmware's station record   */
+         for (v = p + 1; *v && (*v < '0' || *v > '9'); v++) ;
+         g_fwht = (UCHAR)(*v == '1' ? 1 : 0);
+         return;
+      }
       if (eqn(k, (USHORT)(e - k), "ampdu")) {         /* AMPDU = 0 | 1: receive aggregation (default 1)       */
          for (v = p + 1; *v && (*v < '0' || *v > '9'); v++) ;
          g_ampdu = (UCHAR)(*v == '0' ? 0 : 1);

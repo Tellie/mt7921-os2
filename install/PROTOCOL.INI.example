@@ -26,3 +26,7 @@
    ; The options of Paul Smedley's iwlwifi driver (STREAMS, MAXWIDTH, AMPDU, AGGTX, RATEADAPT, POWERSAVE) are
    ; parsed by the shared station code, but the MT7921 back end does not use them yet: it runs 20 MHz,
    ; without aggregation and without power save.
+
+   ; Experimental (v0.42): FWHT = 1 tells the firmware that the access point is an HT (802.11n) station,
+   ; as Linux does. Needed for access points that only send to HT stations at HT rates.
+   ; FWHT = 1
