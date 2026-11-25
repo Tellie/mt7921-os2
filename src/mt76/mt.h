@@ -137,5 +137,8 @@ void   mt_rx_frame(UCHAR FAR *b, USHORT len);   /* one RX buffer with a frame (R
 extern USHORT g_roc_held;
 extern USHORT g_uni_st[4];                      /* 0 DEV_INFO, 1 BSS_INFO, 3 last UNI command          */
 extern ULONG  g_uni_val[4];
+extern UCHAR  g_uh_cid[8], g_uh_tag[8];
+extern USHORT g_uh_st[8], g_uh_n;
+extern ULONG  g_uh_val[8];
 
 #endif

@@ -23,12 +23,18 @@ static USHORT g_txlk;
 
 USHORT g_uni_st[4];                                 /* DEV_INFO, BSS_INFO at bring-up; last join command   */
 ULONG  g_uni_val[4];
+UCHAR  g_uh_cid[8], g_uh_tag[8];                    /* the last 8 UNI commands: cid, first tlv tag,         */
+USHORT g_uh_st[8];                                  /* McuSend status and firmware status                  */
+ULONG  g_uh_val[8];
+USHORT g_uh_n;
 
 /* send a UNI command and wait; answer: le32 status at +40 (mt76_connac2_mcu_uni_event, after the 36-byte rxd).
- * Returns 0 = OK, else the McuSend status (ST_NOTX / ST_NOEVT) or 1 = the firmware reported an error.  */
+ * Returns 0 = OK, else ST_NOTX / ST_NOEVT. A firmware error status is recorded (status text, UNIHIST=) but
+ * not fatal: the stand-alone driver never checked it and its joins went through.                          */
 static USHORT uni_slot(UCHAR cid, USHORT plen, USHORT slot)
 {
-   USHORT st;
+   USHORT st, k = (USHORT)(g_uh_n & 7);
+   UCHAR tag = (UCHAR)((cid == MCU_UNI_CMD_STA_REC_UPDATE) ? g_pl[8] : g_pl[4]);
    ULONG v = 0;
 
    g_kind = MK_UNI;
@@ -37,9 +43,14 @@ static USHORT uni_slot(UCHAR cid, USHORT plen, USHORT slot)
       v = (g_evtlen >= 44) ? evt32(40) : 0xFFFFFFFEUL;
    g_uni_st[slot] = st;
    g_uni_val[slot] = v;
+   g_uh_cid[k] = cid;
+   g_uh_tag[k] = tag;
+   g_uh_st[k] = st;
+   g_uh_val[k] = v;
+   g_uh_n++;
    if (st >= ST_NOTX)
       return st;
-   return (USHORT)((v != 0UL && v != 0xFFFFFFFEUL) ? 1 : 0);
+   return 0;
 }
 
 static USHORT uni(UCHAR cid, USHORT plen)

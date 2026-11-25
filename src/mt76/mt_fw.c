@@ -463,4 +463,16 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
    ps(" BSSINFO="); ph(g_uni_st[1], 4); ps("/"); ph(g_uni_val[1], 8);
    ps(" LASTUNI="); ph(g_uni_st[3], 4); ps("/"); ph(g_uni_val[3], 8);
    ps("  (status FFFF = no answer, FFFE = not sent; value = firmware status)"); nl();
+   {
+      USHORT i, n = (USHORT)(g_uh_n < 8 ? g_uh_n : 8);
+
+      ps("UNIHIST (oldest first; cid 01 DEV 02 BSS 03 STA_REC, tag, status/firmware):");
+      for (i = 0; i < n; i++) {
+         USHORT k = (USHORT)((g_uh_n - n + i) & 7);
+
+         ps(" "); ph(g_uh_cid[k], 2); ps("."); ph(g_uh_tag[k], 2); ps("="); ph(g_uh_st[k], 4);
+         ps("/"); ph(g_uh_val[k], 8);
+      }
+      nl();
+   }
 }

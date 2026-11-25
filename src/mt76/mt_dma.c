@@ -20,6 +20,7 @@ DMA  g_cmdbuf, g_bounce, g_txslot[TX0_N];
 USHORT g_mt_on;
 USHORT g_scan_done, g_roc_granted, g_evt_done;
 UCHAR  g_roc_status, g_roc_ch, g_wait_seq;
+static UCHAR g_wait_cid = 0xFF;                    /* UNI DEV/BSS/STA_REC: the answer must carry this cid */
 USHORT g_rx_frames, g_rx_events, g_rx_other, g_tx_frames, g_tx_full;
 
 UCHAR  g_kind = MK_LEGACY, g_setq = MCU_Q_NA, g_extcid;
@@ -249,6 +250,10 @@ USHORT mt_mcu(UCHAR cid, USHORT plen, int wait)
          b[43] = 1;                                 /* ext_cid_ack (byte 42 is s2d_index)                  */
       }
    }
+   /* like mt7921_mcu_parse_response: an answer to DEV_INFO / BSS_INFO / STA_REC_UPDATE whose cid does not
+    * match is skipped (-EAGAIN) and the wait goes on */
+   g_wait_cid = (UCHAR)((g_kind == MK_UNI && cid >= MCU_UNI_CMD_DEV_INFO_UPDATE &&
+                         cid <= MCU_UNI_CMD_STA_REC_UPDATE) ? cid : 0xFF);
    g_kind = MK_LEGACY;
    g_setq = MCU_Q_NA;
    fmemcpy(b + hdr, (UCHAR FAR *)g_pl, plen);
@@ -283,7 +288,7 @@ static void rx_buffer(UCHAR FAR *b, USHORT len)
       return;
    }
    g_rx_events++;
-   if (g_wait_seq && b[29] == g_wait_seq) {                      /* the answer mt_mcu() waits for              */
+   if (g_wait_seq && b[29] == g_wait_seq && (g_wait_cid == 0xFF || (len >= 44 && b[36] == g_wait_cid))) {
       g_evtlen = (len > sizeof(g_evt)) ? (USHORT)sizeof(g_evt) : len;
       fmemcpy((UCHAR FAR *)g_evt, b, g_evtlen);
       g_wait_seq = 0;
