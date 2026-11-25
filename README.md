@@ -18,17 +18,17 @@ Since v0.30 the driver has two parts:
 Paul asked to keep the brands apart, so this is a separate driver that uses his code as its base, not a back end
 inside his repository.
 
-## Status (v0.30)
+## Status (v0.37)
 
-Proven on the hardware with the stand-alone driver (v0.01-v0.20): ROM patch and RAM firmware load, real MAC from
-the chip, warm-reboot reattach to the running firmware, hardware scan on 2.4 and 5 GHz, Open System authentication
-with an access point.
+Working on the HP Victus (ArcaOS 5.1.2) since v0.36: firmware load (cold and warm-reboot reattach), scan on 2.4
+and 5 GHz, WPA2-PSK (CCMP) via wpa_supplicant, DHCP, ping to the router and to the internet, interrupt-driven.
 
-New in v0.30 and **not tested on hardware yet**: everything in the new structure, plus association, BSS/STA
-records after association, CCMP keys (pairwise and group) in the firmware, data frames in both directions, the
-interrupt (with polled fallback) and the NDIS binding.
-
-Not done: 40/80 MHz, HT/VHT rates for transmit (legacy rates only), aggregation, power save, WPA3/TKIP/WEP.
+Known issues / not done:
+* A second access point of the same network (mesh extender, 50:e0:39:...) delivers data frames that the station
+  drops as "not from our AP" (v0.37 shows them as DROP0= in the status text). Workaround: `bssid=` of the main
+  router in wpa.conf.
+* Legacy rates only (max 54 Mbit/s, 20 MHz): no HT/VHT transmit rates, no aggregation, no 40/80 MHz, no power
+  save, no WPA3/TKIP/WEP.
 
 ## Install (for testing)
 
@@ -44,6 +44,10 @@ Not done: 40/80 MHz, HT/VHT rates for transmit (legacy rates only), aggregation,
 6. Reboot. `copy \DEV\WRND32$ con` prints the driver state (`STATE=0064 READY`, `HWMAC=`...). `MTMAC.CMD` writes
    the adapter's MAC into PROTOCOL.INI.
 7. Connect with wpa_supplicant (`wpa_supplicant -i lan1 -c wpa.conf`) or the Wireless LAN Monitor.
+8. DHCP: set lan1 to DHCP in TCPCFG2 (DHCP can be on one interface only), then `dhcpstrt -i lan1 -d 30` once
+   wpa_supplicant is connected. `install\WIFI.CMD` does both (wpa_supplicant in a minimised window, then DHCP);
+   call it from the startup.cmd in the Startup folder. To avoid the boot-time DHCP wait, change `-d NN` to `-d 0`
+   in `\MPTN\BIN\SETUP.CMD`.
 
 ## Building
 
