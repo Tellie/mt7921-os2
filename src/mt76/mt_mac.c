@@ -21,6 +21,8 @@ USHORT g_rxs[2][6];                                 /* RX security counters, see
 ULONG  g_rxs_d1[4];
 UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
+UCHAR  g_act[4][6];                                  /* the last 4 action frames from our AP: first 6 body bytes */
+USHORT g_act_n;
 USHORT g_rxm[2][5];                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
 USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last, g_echo;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
 static ULONG g_tim_t;
@@ -170,6 +172,10 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
                g_tim_null++;
          }
       }
+   }
+   if ((b[h] == 0xD0 || b[h] == 0xE0) && g_mnet && len >= h + 30 && same6(b + h + 10, (UCHAR FAR *)g_mnet->bssid)) {
+      fmemcpy((UCHAR FAR *)g_act[g_act_n & 3], b + h + 24, 6);   /* category, action, ...              */
+      g_act_n++;
    }
    /* receive security counters, data frames only: [0] unicast, [1] group-addressed */
    if ((b[h] & 0x0C) == 0x08) {
@@ -570,7 +576,7 @@ int hw_join_prepare(net_t *n)
       return -1;
    roc_release();
    g_mnet = n;
-   g_tim_bcn = g_tim_set = g_tim_null = g_echo = 0;
+   g_tim_bcn = g_tim_set = g_tim_null = g_echo = g_act_n = 0;
    fmemset((UCHAR FAR *)g_rxm, 0, sizeof(g_rxm));
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {

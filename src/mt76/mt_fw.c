@@ -510,6 +510,14 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps(" group=");
       for (i = 0; i < 5; i++) { ph(g_rxm[1][i], 4); ps(" "); }
       ps(" FWHT="); ph(g_fwht, 1); nl();
+      ps("ACTION (from our AP, last 4: category action ...) n="); ph(g_act_n, 4);
+      for (i = 0; i < 4 && i < g_act_n; i++) {
+         USHORT j;
+
+         ps(" ");
+         for (j = 0; j < 6; j++) ph(g_act[i][j], 2);
+      }
+      nl();
       ps("ECHO (our own broadcasts sent back by the AP = it decrypted our frames)="); ph(g_echo, 4);
       ps(" AP-WMM="); ph(g_jnet ? g_jnet->wmm : 0xFF, 2); nl();
       ps("DROP0 (data not from our AP; fc0 fc1 addr1 addr2 addr3; BSSID=");
