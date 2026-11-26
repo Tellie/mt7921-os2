@@ -6,5 +6,12 @@ rem into it once per boot, the patch FIRST, as one stream:
 copy /b C:\IBMCOM\MACS\MT7921\WIFI_MT7961_patch_mcu_1_2_hdr.bin + C:\IBMCOM\MACS\MT7921\WIFI_RAM_CODE_MT7961_1.bin \DEV\WRND32$ > nul
 rem The adapter starts as soon as the files are in (a few seconds), so the driver knows its real MAC
 rem before the protocol stack binds. Keep this line BEFORE anything that starts networking.
+rem Bigger TCP windows: one download is limited by window / round-trip time (default 32 KB = about
+rem 1.5 MB/s to a server 20 ms away). 246723 is the stack's maximum ('inetcfg -g tcprwinsize'; check
+rem the maximum of tcpswinsize the same way and use that).
+inetcfg -s winscale 1
+inetcfg -s sack 1
+inetcfg -s tcprwinsize 246723
+inetcfg -s tcpswinsize 246723
 rem The state at any time:        copy \DEV\WRND32$ con
 rem To retry a failed start:      echo up > \DEV\WRND32$

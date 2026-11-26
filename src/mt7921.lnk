@@ -4,7 +4,7 @@
 format os2 dll
 name MT7921.OS2
 option quiet,map=MT7921.map,verbose,caseexact,eliminate,nodefaultlibs
-option description '@#TeLLie:0.50#@##1## 26 Nov 2026 20:40:00     ARCAOS-DEV::en:US:2:::@@MediaTek MT7921 PCIe WiFi driver for OS/2 and ArcaOS (GenMAC + NDIS, mt76 back end)'
+option description '@#TeLLie:0.51#@##1## 26 Nov 2026 21:40:00     ARCAOS-DEV::en:US:2:::@@MediaTek MT7921 PCIe WiFi driver for OS/2 and ArcaOS (GenMAC + NDIS, mt76 back end)'
 segment class 'CODE' iopl
 import DOSOPEN DOSCALLS.70
 import DOSCLOSE DOSCALLS.59

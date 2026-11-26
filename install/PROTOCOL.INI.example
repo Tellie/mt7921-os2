@@ -23,9 +23,12 @@
    ; Optional: join only an access point on this primary channel (testing).
    ; CHANNEL = 6
 
-   ; The options of Paul Smedley's iwlwifi driver (STREAMS, MAXWIDTH, AMPDU, AGGTX, RATEADAPT, POWERSAVE) are
-   ; parsed by the shared station code, but the MT7921 back end does not use them yet: it runs 20 MHz,
-   ; without aggregation and without power save.
+   ; Options of the shared station code (all optional; the defaults are the fastest):
+   ; MAXWIDTH = 20 | 40 | 80   widest channel (default 80)
+   ; STREAMS = 1 | 2           spatial streams (default 2)
+   ; AMPDU = 0                 no receive aggregation
+   ; AGGTX = 0                 no QoS data, no transmit aggregation
+   ; (RATEADAPT and POWERSAVE are read but not used by the MT7921 back end.)
 
    ; FWHT = 0 keeps the firmware from knowing that the access point is an HT (802.11n) station (legacy rates
    ; only). Default 1 since v0.45. 'echo fwht 0 > \DEV\WRND32$' does the same without a reboot (next join).
