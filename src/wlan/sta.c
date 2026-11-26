@@ -264,8 +264,9 @@ static int tx_deauth(void)
  * to net80211 for this firmware). A frame that is missing for BA_HOLD_MS is skipped. Frames are held as Ethernet
  * frames in DMA memory (allocated at join time: the receive path must not allocate). */
 #define BA_N        2                                   /* sessions at once                                   */
-#define BA_WIN      32                                  /* window: a power of two (the slot of a number is sn % win) */
+#define BA_WIN      64                                  /* window: a power of two (the slot of a number is sn % win) */
 #define BA_SLOT     1520
+#define BA_PART     32                                  /* slots per DMA block (32 x 1520 fits a 64 KB chunk)  */
 #define BA_HOLD_MS  100
 
 typedef struct {
@@ -277,7 +278,7 @@ typedef struct {
 
 static void atx_tick(void);                             /* transmit aggregation, below                         */
 static ba_t   g_ba[BA_N];
-static DMA    g_ba_buf[BA_N];
+static DMA    g_ba_buf[BA_N][BA_WIN / BA_PART];
 static UCHAR  g_ba_buf_ok[BA_N];
 UCHAR  g_ampdu = 1;
 UCHAR  g_fwht = 1;                                       /* PROTOCOL.INI FWHT = 1: tell the firmware about HT     */
@@ -291,7 +292,7 @@ static int    sn_less(USHORT a, USHORT b) { return sn_sub(a, b) > 2048; }
 
 static UCHAR FAR *ba_slot(USHORT bi, USHORT idx)
 {
-   return DPTR(g_ba_buf[bi]) + idx * BA_SLOT;
+   return DPTR(g_ba_buf[bi][idx / BA_PART]) + (idx % BA_PART) * BA_SLOT;
 }
 
 /* Buffers for the sessions: called at the end of a join (request path). */
@@ -299,9 +300,16 @@ static void ba_alloc(void)
 {
    USHORT i;
 
-   for (i = 0; i < BA_N; i++)
-      if (!g_ba_buf_ok[i] && dma_get((USHORT)(BA_WIN * BA_SLOT), &g_ba_buf[i]) == 0)
-         g_ba_buf_ok[i] = 1;
+   for (i = 0; i < BA_N; i++) {
+      USHORT j, ok = 1;
+
+      if (g_ba_buf_ok[i])
+         continue;
+      for (j = 0; j < BA_WIN / BA_PART; j++)
+         if (!g_ba_buf[i][j].phys && dma_get((USHORT)(BA_PART * BA_SLOT), &g_ba_buf[i][j]))
+            ok = 0;                                    /* (a part that was taken stays: no leak on a retry)  */
+      g_ba_buf_ok[i] = (UCHAR)ok;
+   }
 }
 
 static void ba_out(USHORT bi, ba_t *b, USHORT idx)      /* hand a held frame to the stack                      */
