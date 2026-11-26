@@ -33,6 +33,10 @@ static net_t *g_mnet;
 #define TXF_FIXED    0x0100                         /* basic rate (management, EAPOL)                       */
 static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT flags, UCHAR wcid);                               /* the AP of the current join                         */
 static USHORT g_txlk;
+UCHAR  g_txba = 1;                                   /* transmit block-ack sessions ('echo txba 0|1')        */
+static UCHAR  g_txagg_on;                           /* TID 0 session with the AP is up                     */
+static USHORT g_qsn;                                /* next sequence number of our QoS data, TID 0         */
+USHORT g_txagg_n;
 static UCHAR  g_pid = 2;                            /* TX status packet ids 3..63 (MT_PACKET_ID_FIRST = 3)  */
 UCHAR  g_txs_last, g_eapol_pid;                       /* pid of the last TX status; of the last EAPOL frame  */
 UCHAR  g_ev_c[16];                                   /* handshake log: event, value, ms                     */
@@ -322,7 +326,9 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    if (fixed)
       w |= 0x80002000UL;                            /* FIX_RATE, HTC_VLD                                   */
    put32(b + 8, w);
-   w = 0x10000000UL | (15UL << 11);                 /* BA_DISABLE, REM_TX_COUNT 15                         */
+   w = 15UL << 11;                                  /* REM_TX_COUNT 15                                     */
+   if (!(g_txagg_on && fc == 0x88 && tid == 0))
+      w |= 0x10000000UL;                            /* BA_DISABLE (no transmit block-ack session)          */
    if (flags & HWTX_PROTECT)
       w |= 0x00000002UL;                            /* PROTECT_FRAME: encrypt with the key in the WTBL     */
    put32(b + 12, w);
@@ -341,6 +347,11 @@ static int tx0(UCHAR FAR *hdr, USHORT hlen, UCHAR FAR *body, USHORT blen, USHORT
    fmemcpy(b + 64, hdr, hlen);
    if (blen)
       fmemcpy(b + 64 + hlen, body, blen);
+   if (fc == 0x88 && tid == 0) {                    /* QoS data TID 0: its own sequence numbers            */
+      b[64 + 22] = (UCHAR)(g_qsn << 4);
+      b[64 + 23] = (UCHAR)(g_qsn >> 4);
+      g_qsn = (USHORT)((g_qsn + 1) & 0x0FFF);
+   }
 
    d = DPTR(g_rtx0.desc) + slot * 16;
    put32(d + 0, g_txslot[slot].phys);
@@ -485,6 +496,8 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
    p += 16;                                         /* STA_REC_STATE                                       */
    pl16(p, 7); pl16(p + 2, 12);
    g_pl[p + 8] = state;                             /* 0 NONE, 2 ASSOC                                     */
+   if (vht)                                         /* vht_opmode: the AP's bandwidth and rx streams       */
+      g_pl[p + 9] = (UCHAR)(op_bw() | ((g_jnss - 1) << 4));
    p += 12;                                         /* STA_REC_WTBL                                        */
    pl16(p, 13); pl16(p + 2, wlen);
    g_pl[p + 4] = AP_WCID;
@@ -724,6 +737,7 @@ int hw_join_complete(void)
 
 void hw_leave(void)
 {
+   g_txagg_on = 0;
    roc_release();
    if (g_mnet && g_hw_ready)
       bss_info(0);
@@ -791,12 +805,12 @@ int hw_key_clear(USHORT pairwise, UCHAR idx)
  * commands are queued and sent from the service routine (mt_ba_flush) on their own buffer, without waiting.
  * The frames are put back in order by the station (wlan/sta.c ba_input), as mt76 does in software. */
 #define BAQ_N 8
-static struct { UCHAR tid, en, step; USHORT ssn, win; } g_baq[BAQ_N];
+static struct { UCHAR tid, en, step, type; USHORT ssn, win; } g_baq[BAQ_N];   /* type 2 recipient, 1 originator */
 static USHORT g_baq_h, g_baq_t;
 static UCHAR  g_bapl[64];
 USHORT g_ba_cmds, g_ba_busy, g_ba_lost;
 
-static int ba_queue(UCHAR tid, UCHAR en, USHORT ssn, USHORT win)
+static int ba_queue(UCHAR tid, UCHAR en, USHORT ssn, USHORT win, UCHAR type)
 {
    USHORT fl = rt_irq_save(), n = (USHORT)((g_baq_h + 1) % BAQ_N);
    int rc = -1;
@@ -805,6 +819,7 @@ static int ba_queue(UCHAR tid, UCHAR en, USHORT ssn, USHORT win)
       g_baq[g_baq_h].tid = tid;
       g_baq[g_baq_h].en = en;
       g_baq[g_baq_h].step = 0;
+      g_baq[g_baq_h].type = type;
       g_baq[g_baq_h].ssn = ssn;
       g_baq[g_baq_h].win = win;
       g_baq_h = n;
@@ -819,7 +834,7 @@ void mt_ba_flush(void)
 {
    while (g_baq_t != g_baq_h) {
       USHORT k = g_baq_t, len;
-      UCHAR tid = g_baq[k].tid, en = g_baq[k].en;
+      UCHAR tid = g_baq[k].tid, en = g_baq[k].en, ty = g_baq[k].type;
 
       if (!g_hw_ready || !g_mnet) {                 /* left the AP meanwhile: nothing to set up            */
          g_baq_t = (USHORT)((g_baq_t + 1) % BAQ_N);
@@ -838,18 +853,23 @@ void mt_ba_flush(void)
          put16((UCHAR FAR *)g_bapl + 20, 8);        /* WTBL_BA, 28 bytes                                   */
          put16((UCHAR FAR *)g_bapl + 22, 28);
          g_bapl[24] = tid;
-         g_bapl[25] = 2;                            /* MT_BA_TYPE_RECIPIENT                                */
+         g_bapl[25] = ty;                           /* MT_BA_TYPE_ORIGINATOR 1 / RECIPIENT 2               */
          put16((UCHAR FAR *)g_bapl + 32, en ? g_baq[k].win : 0);    /* ba_winsize                          */
-         fmemcpy((UCHAR FAR *)g_bapl + 34, (UCHAR FAR *)g_mnet->bssid, 6);   /* peer_addr                 */
-         g_bapl[40] = tid;                          /* rst_ba_tid                                          */
-         g_bapl[41] = 0;                            /* RST_BA_MAC_TID_MATCH                                */
-         g_bapl[42] = 1;                            /* rst_ba_sb                                           */
+         if (ty == 1) {                             /* originator: sn, ba_en                               */
+            put16((UCHAR FAR *)g_bapl + 28, en ? g_baq[k].ssn : 0);
+            g_bapl[30] = en;
+         } else {
+            fmemcpy((UCHAR FAR *)g_bapl + 34, (UCHAR FAR *)g_mnet->bssid, 6);   /* peer_addr              */
+            g_bapl[40] = tid;                       /* rst_ba_tid                                          */
+            g_bapl[41] = 0;                         /* RST_BA_MAC_TID_MATCH                                */
+            g_bapl[42] = 1;                         /* rst_ba_sb                                           */
+         }
          len = 48;
       } else {                                      /* STA_REC_BA                                          */
          put16((UCHAR FAR *)g_bapl + 8, 6);
          put16((UCHAR FAR *)g_bapl + 10, 12);
          g_bapl[12] = tid;
-         g_bapl[13] = 2;                            /* recipient                                           */
+         g_bapl[13] = ty;                           /* originator / recipient                              */
          g_bapl[14] = 0;                            /* no A-MSDU                                           */
          g_bapl[15] = (UCHAR)(en ? (1 << tid) : 0);
          put16((UCHAR FAR *)g_bapl + 16, g_baq[k].ssn);
@@ -872,17 +892,48 @@ int hw_ba_start(UCHAR tid, USHORT ssn, USHORT win)
 {
    if (!g_hw_ready || !g_mnet || !g_rxba)
       return -1;
-   return ba_queue(tid, 1, ssn, win);
+   return ba_queue(tid, 1, ssn, win, 2);
 }
 
 int hw_ba_stop(UCHAR tid)
 {
    if (!g_hw_ready || !g_mnet)
       return 0;
-   (void)ba_queue(tid, 0, 0, 0);
+   (void)ba_queue(tid, 0, 0, 0, 2);
    return 0;
 }
-int    hw_txagg_ok(void)                              { return 0; }
-USHORT hw_qos_sn(void)                                { return 0; }
-void   hw_txagg_offer(UCHAR tid, USHORT win)          { (void)tid; (void)win; }
-void   hw_txagg_stop(UCHAR tid)                       { (void)tid; }
+/* Transmit aggregation, TID 0 (mt7921_mcu_uni_tx_ba -> mt76_connac_mcu_sta_ba, originator). Our QoS data frames
+ * of TID 0 carry their own sequence numbers (g_qsn, set in tx0), so the starting sequence number of the ADDBA
+ * request is known; once the AP accepts, the firmware gets WTBL_BA + STA_REC_BA and tx0 stops setting BA_DISABLE
+ * for those frames: the hardware then builds the A-MPDUs. 'echo txba 0|1'. */
+
+int hw_txagg_ok(void)
+{
+   return (g_txba && g_hw_ready && g_mnet && g_fwht && g_jht) ? 1 : 0;
+}
+
+USHORT hw_qos_sn(void)
+{
+   return g_qsn;
+}
+
+void hw_txagg_offer(UCHAR tid, USHORT win)
+{
+   if (!hw_txagg_ok() || tid)
+      return;
+   if (!win || win > 64)
+      win = 64;
+   if (!ba_queue(0, 1, g_qsn, win, 1)) {
+      g_txagg_on = 1;
+      g_txagg_n++;
+   }
+}
+
+void hw_txagg_stop(UCHAR tid)
+{
+   if (tid || !g_txagg_on)
+      return;
+   g_txagg_on = 0;
+   if (g_hw_ready && g_mnet)
+      (void)ba_queue(0, 0, 0, 0, 1);
+}

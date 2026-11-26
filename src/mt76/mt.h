@@ -99,7 +99,8 @@ int    mt_mcu_async_uni(UCHAR cid, UCHAR FAR *pl, USHORT plen);
 void   mt_ba_flush(void);
 #define MCU_DEAD   3                            /* this many unanswered commands in a row: firmware dead  */
 extern USHORT g_mcu_fail, g_ba_cmds, g_ba_busy, g_ba_lost;
-extern UCHAR  g_rxba;
+extern UCHAR  g_rxba, g_txba;
+extern USHORT g_txagg_n;
 extern USHORT g_force_cold, g_resets;
 void   pl_zero(USHORT n);
 void   pl16(USHORT at, USHORT v);

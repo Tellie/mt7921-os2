@@ -504,7 +504,8 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
    ps(g_hw_ready ? " READY" : (g_hw_failed ? " FAILED" : " not started"));
    ps(g_reattached ? " (firmware reused after warm reboot)" : "");
    ps(" RESETS="); ph(g_resets, 2); ps(" MCUFAIL="); ph(g_mcu_fail, 2); nl();
-   ps("RXBA (block-ack firmware commands) on="); ph(g_rxba, 1); ps(" sent="); ph(g_ba_cmds, 4);
+   ps("RXBA (block-ack firmware commands) rx-on="); ph(g_rxba, 1); ps(" tx-on="); ph(g_txba, 1);
+   ps(" tx-sessions="); ph(g_txagg_n, 4); ps(" sent="); ph(g_ba_cmds, 4);
    ps(" ring-busy="); ph(g_ba_busy, 4); ps(" queue-full="); ph(g_ba_lost, 4); nl();
    ps("PATCH="); ph(g_patch_len, 8); ps(" RAM="); ph(g_ram_len, 8);
    if (ver[0]) { ps(" FWVER="); ps(ver); ps(" "); ps(date); }

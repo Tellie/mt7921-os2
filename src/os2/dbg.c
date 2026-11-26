@@ -165,6 +165,12 @@ static void run_cmd(void)
       while (*q && (*q < '0' || *q > '9')) q++;
       if (*q)
          g_rxba = (UCHAR)(*q == '1');
+   } else if (c[0] == 't' && c[1] == 'x') {                  /* "txba 0|1": transmit block-ack sessions     */
+      char *q = c + 2;
+
+      while (*q && (*q < '0' || *q > '9')) q++;
+      if (*q)
+         g_txba = (UCHAR)(*q == '1');
    } else if ((c[0] == 'a' && c[1] == 'g') || (c[0] == 'f' && c[1] == 'w')) {   /* "aggtx 0|1", "fwht 0|1"   */
       char *q = c + 2;                                         /* (from the next join on)                     */
 
