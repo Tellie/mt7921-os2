@@ -6,6 +6,11 @@
  *   /hw  run the phase 2 hardware probe (fw/driver own + chip ID)
  *   /fw  run the phase 3a firmware boot (WFDMA + ROM patch download)
  *   /x:N experiment flags for /fw (hex, see FWX_ in wrnd_ioctl.h)
+ *   /scan  diagnostic scan (loads the firmware if needed)
+ *   /list  like wpa_supplicant: OID BSSID_LIST_SCAN, then BSSID_LIST
+ *   /auth:SSID  phase 5a: one Open System authentication with that AP
+ *   /conn:SSID  phase 5b: authenticate + associate (open network or
+ *               WPA2-PSK; the key handshake needs wpa_supplicant)
  */
 #define INCL_DOS
 #define INCL_DOSDEVIOCTL
@@ -253,6 +258,167 @@ static void fw_boot(void)
     }
 }
 
+static void scan_print_st(const char *name, unsigned v)
+{
+    if (v == 0xFFFF)      printf("  %-16s - (no answer)\n", name);
+    else if (v == 0xFFFE) printf("  %-16s not sent (TX timeout)\n", name);
+    else                  printf("  %-16s answered (%u)\n", name, v);
+}
+
+static void do_scan(void)
+{
+    static MT7921_SCAN s;
+    static const char *stp[] = { "start", "EFUSE_BUFFER_MODE", "MAC_INIT_CTRL",
+        "SET_CHAN_DOMAIN", "SET_RX_PATH",
+        "DEV_INFO_UPDATE", "BSS_INFO_UPDATE", "START_HW_SCAN",
+        "collect beacons", "done" };
+    static const char *err[] = { "OK", "firmware not running - run /fw first",
+        "command not taken by DMA", "no answer from the firmware",
+        "firmware returned an error", "no SCAN_DONE event (timeout)" };
+    ULONG st, done;
+    int rc, i, k;
+
+    memset(&s, 0, sizeof(s));
+    printf("\nScan (the system pauses for up to ~10 seconds) ...\n");
+    rc = oid_req(0, OID_PRIVATE_MT7921_SCAN, &s, sizeof(s), &st, &done);
+    printf("Scan: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st || s.Magic != MT7921_SCAN_MAGIC) {
+        printf("  driver does not support /scan (old MT7921.OS2?)\n");
+        return;
+    }
+    printf("  result          %s at step %u (%s)\n",
+           s.Error < 6 ? err[s.Error] : "?", s.Step, s.Step < 10 ? stp[s.Step] : "?");
+    scan_print_st("EFUSE mode", s.StEfuse);
+    scan_print_st("MAC enable", s.StMacEn);
+    printf("  CHAN_DOMAIN     %s\n", s.StChanDom == 0 ? "sent (NL, 13 + 19 channels)" :
+           s.StChanDom == 0xFFFE ? "not sent (TX timeout)" : "-");
+    scan_print_st("RX path", s.StRxPath);
+    printf("  DEV_INFO        UNI status %08lX (0 = OK)\n", s.DevUni);
+    printf("  BSS_INFO        UNI status %08lX (0 = OK)\n", s.BssUni);
+    printf("  HW_SCAN         %s\n", s.StScan == 0 ? "sent" :
+           s.StScan == 0xFFFE ? "not sent (TX timeout)" : "-");
+    printf("  RX frames       %lu, beacons/probe responses %lu, other events %lu\n",
+           s.Events, s.Beacons, s.Frames);
+    printf("  SCAN_DONE       %s after %lu x 16 ms\n", s.ScanDone ? "yes" : "NO", s.Polls);
+    if (s.ScanDone)
+        printf("                  seq %u, channels scanned %u, state %u, beacons %lu, country %.3s\n",
+               s.DoneEvt[0], s.DoneEvt[4], s.DoneEvt[5],
+               (ULONG)s.DoneEvt[8] | ((ULONG)s.DoneEvt[9] << 8) |
+               ((ULONG)s.DoneEvt[10] << 16) | ((ULONG)s.DoneEvt[11] << 24),
+               (char *)&s.DoneEvt[20]);
+    if (s.Frames) {
+        printf("  other event ids");
+        for (i = 0; i < 8 && i < (int)s.Frames; i++)
+            printf(" %02X", s.EvtIds[i]);
+        printf("\n");
+    }
+    if (s.FirstLen) {
+        printf("  first RX frame  %u bytes:", s.FirstLen);
+        for (i = 0; i < 64 && i < s.FirstLen; i++)
+            printf("%s%02X", i % 16 ? " " : "\n    ", s.FirstFrame[i]);
+        printf("\n");
+    }
+    printf("\n  %u network(s) found%s:\n", s.NBss, s.NBss > 16 ? " (first 16 shown)" : "");
+    for (i = 0; i < s.NBss && i < 16; i++) {
+        MT7921_BSS *b = &s.Bss[i];
+        char ssid[33];
+        for (k = 0; k < b->SsidLen && k < 32; k++)
+            ssid[k] = (b->Ssid[k] >= 32 && b->Ssid[k] < 127) ? b->Ssid[k] : '.';
+        ssid[k] = 0;
+        printf("    %02X:%02X:%02X:%02X:%02X:%02X  ch %3u  %4d dBm  %s\n",
+               b->Bssid[0], b->Bssid[1], b->Bssid[2], b->Bssid[3],
+               b->Bssid[4], b->Bssid[5], b->Channel, s.Rssi[i],
+               b->SsidLen ? ssid : "(hidden)");
+    }
+}
+
+/* exactly what wpa_supplicant-os2 does: SET BSSID_LIST_SCAN, then GET
+ * BSSID_LIST (10000 bytes, PacketRequest caps it) and walk the
+ * NDIS_WLAN_BSSID_EX entries like driver_genmac.c                    */
+static ULONG le32(const unsigned char *p)
+{
+    return (ULONG)p[0] | ((ULONG)p[1] << 8) | ((ULONG)p[2] << 16) | ((ULONG)p[3] << 24);
+}
+
+static void do_list(void)
+{
+    static unsigned char buf[10000];
+    ULONG st, done, n, i, pos;
+    int rc;
+
+    printf("\nBSSID_LIST_SCAN ...\n");
+    memcpy(buf, "    ", 4);
+    rc = oid_req(1, OID_802_11_BSSID_LIST_SCAN, buf, 4, &st, &done);
+    printf("  scan: rc=%d status=%08lX\n", rc, st);
+
+    memset(buf, 0, sizeof(buf));
+    rc = oid_req(0, OID_802_11_BSSID_LIST, buf, sizeof(buf), &st, &done);
+    printf("  BSSID_LIST: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st) return;
+
+    n = le32(buf);
+    printf("  %lu entries (as wpa_supplicant will see them):\n", n);
+    printf("    BSSID              MHz   dBm  priv  IEs  RSN WPA  SSID\n");
+    for (i = 0, pos = 4; i < n && pos + 116 <= done; i++) {
+        unsigned char *e = buf + pos;
+        ULONG elen = le32(e), ssidlen = le32(e + 12), ielen = le32(e + 112);
+        ULONG p;
+        int rsn = 0, wpa = 0;
+        char ssid[33];
+        unsigned k;
+
+        if (elen < 116 || pos + elen > done) { printf("    bad entry length %lu\n", elen); break; }
+        for (k = 0; k < ssidlen && k < 32; k++)
+            ssid[k] = (e[16 + k] >= 32 && e[16 + k] < 127) ? e[16 + k] : '.';
+        ssid[k] = 0;
+        for (p = 116 + 12; p + 2 <= 116 + ielen; p += 2 + e[p + 1]) {
+            if (e[p] == 48) rsn = 1;
+            if (e[p] == 221 && e[p + 1] >= 4 && e[p + 2] == 0x00 &&
+                e[p + 3] == 0x50 && e[p + 4] == 0xF2 && e[p + 5] == 1) wpa = 1;
+        }
+        printf("    %02X:%02X:%02X:%02X:%02X:%02X  %4lu  %4ld   %s   %4lu   %s   %s  %s\n",
+               e[4], e[5], e[6], e[7], e[8], e[9],
+               le32(e + 72) / 1000, (long)le32(e + 52),
+               le32(e + 48) ? "yes" : "no ", ielen,
+               rsn ? "+" : "-", wpa ? "+" : "-",
+               ssidlen ? ssid : "(hidden)");
+        pos += elen;
+    }
+}
+
+/* IsWireless() from wpa_supplicant-os2 packet32.c, call for call: one
+ * parameter block reused for ISWIRELESS, GENMAC_VERSION, LANNUMBER   */
+static void wpa_iswireless(void)
+{
+    ULONG Paras[10], ParmInOut, DataInOut, Dummy = 0;
+    APIRET rc;
+
+    memset(Paras, 0, sizeof(Paras));
+    ParmInOut = 10 * 4;
+    DataInOut = 4;
+    Paras[1] = 4;
+    Paras[0] = OID_PRIVATE_WRAPPER_ISWIRELESS;
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  ISWIRELESS      rc=%lu value=%lu\n", rc, Dummy);
+    if (rc || !Dummy) { printf("  => wpa_supplicant would skip this adapter\n"); return; }
+
+    Paras[0] = OID_PRIVATE_WRAPPER_GENMAC_VERSION;          /* Paras[1] not reset! */
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  GENMAC_VERSION  rc=%lu value=%08lX\n", rc, Dummy);
+    if (rc || Dummy < WRND_MIN_VERSION) {
+        printf("  => wpa_supplicant: \"cannot find Genmac V1.08 or better\"\n");
+        return;
+    }
+
+    Paras[0] = OID_PRIVATE_WRAPPER_LANNUMBER;
+    rc = DosDevIOCtl(hDev, WRND_CATEGORY, WRND_FUNC_OID_GET, &Paras[0], ParmInOut,
+                     &ParmInOut, &Dummy, DataInOut, &DataInOut);
+    printf("  LANNUMBER       rc=%lu value=%lu\n", rc, Dummy);
+    printf("  => wpa_supplicant will accept this adapter as lan%lu\n", Dummy);
+}
+
 static void show_u32(const char *name, ULONG oid)
 {
     ULONG v = 0, st, done;
@@ -261,10 +427,76 @@ static void show_u32(const char *name, ULONG oid)
            name, rc, st, done, v, v);
 }
 
+static void do_auth(const char *ssid, int conn)
+{
+    static MT7921_AUTH a;
+    static const char *stp[] = { "start", "scan / pick BSS", "STA_REC_UPDATE",
+        "ROC (channel)", "send auth frame", "wait for answer", "done" };
+    static const char *err[] = { "OK", "firmware not running",
+        "SSID not found in the scan", "not taken by DMA", "no answer",
+        "error status", "no ROC grant event", "no authentication response",
+        "no association response", "association refused" };
+    ULONG st, done;
+    int rc, i, n;
+
+    memset(&a, 0, sizeof(a));
+    n = strlen(ssid);
+    if (n > 32) n = 32;
+    a.SsidLen = (unsigned char)n;
+    memcpy(a.Ssid, ssid, n);
+    printf("\n%s test with '%s' (may scan first, ~10 s) ...\n",
+           conn ? "Connect" : "Authentication", ssid);
+    rc = oid_req(0, conn ? OID_PRIVATE_MT7921_CONNECT : OID_PRIVATE_MT7921_AUTH,
+                 &a, sizeof(a), &st, &done);
+    printf("Auth: rc=%d status=%08lX len=%lu\n", rc, st, done);
+    if (rc || st || a.Magic != MT7921_AUTH_MAGIC) {
+        printf("  driver does not support /auth (old MT7921.OS2?)\n");
+        return;
+    }
+    printf("  result          %s at step %u (%s)\n",
+           a.Error < 10 ? err[a.Error] : "?", a.Step, a.Step < 10 ? stp[a.Step] : "?");
+    printf("  AP              %02X:%02X:%02X:%02X:%02X:%02X  channel %u  %d dBm\n",
+           a.Bssid[0], a.Bssid[1], a.Bssid[2], a.Bssid[3], a.Bssid[4], a.Bssid[5],
+           a.Channel, a.Rssi);
+    if (a.StSta == 0xFFFF)
+        printf("  STA_REC         -\n");
+    else
+        printf("  STA_REC         status %04X, UNI %08lX (0 = OK)\n", a.StSta, a.StaUni);
+    printf("  ROC             %s, grant %s (status %u, channel %u, band %u)\n",
+           a.StRoc == 0 ? "sent" : a.StRoc == 0xFFFE ? "TX timeout" : "-",
+           a.RocGranted ? "yes" : "NO", a.RocStatus, a.RocChannel, a.RocBand);
+    printf("  auth frame      %s\n", a.TxDone ? "taken by DMA" : "not sent");
+    if (a.AuthStatus == 0xFFFF)
+        printf("  response        none\n");
+    else
+        printf("  response        alg %u, seq %u, status %u%s\n", a.AuthAlg,
+               a.AuthSeq, a.AuthStatus, a.AuthStatus == 0 ? "  => AUTHENTICATED" : "");
+    printf("  auth tries      %u\n", a.AuthTries);
+    if (conn) {
+        printf("  assoc           %u tries, ", a.AssocTries);
+        if (a.AssocStatus == 0xFFFF) printf("no response\n");
+        else printf("status %u, AID %u%s\n", a.AssocStatus, a.Aid,
+                    a.AssocStatus == 0 ? "  => ASSOCIATED" : "");
+        printf("  IEs             request %u bytes, response %u bytes\n",
+               a.ReqIeLen, a.RespIeLen);
+        printf("  BSS_INFO        UNI %08lX, STA_REC assoc %08lX, own %08lX\n",
+               a.BssUni, a.Sta2Uni, a.VifUni);
+        printf("  connected       %s\n", a.Connected ? "YES" : "no");
+    }
+    printf("  frames to us    %u (fc/flags/seq):", a.RxFrames);
+    for (i = 0; i < 8 && i < a.RxFrames; i++)
+        printf(" %02X/%02X/%u", a.Fc[i], a.FcFlags[i], a.Seq[i] >> 4);
+    printf("\n  other RX        %u:", a.RxOther);
+    for (i = 0; i < 8 && i < a.RxOther; i++) printf(" %02X", a.EvtIds[i]);
+    printf("\n  waited          %lu x 16 ms\n", a.Polls);
+}
+
 int main(int argc, char **argv)
 {
+    const char *auth_ssid = NULL;
+    int auth_conn = 0;
     const char *dev = "WRND32$";
-    int do_hw = 0, do_fw = 0, i;
+    int do_hw = 0, do_fw = 0, do_sc = 0, do_li = 0, i;
     ULONG action, st, done;
     APIRET rc;
     MT7921_INFO info;
@@ -275,6 +507,16 @@ int main(int argc, char **argv)
             do_hw = 1;
         else if (!stricmp(argv[i], "/fw") || !stricmp(argv[i], "-fw"))
             do_fw = 1;
+        else if (!stricmp(argv[i], "/scan") || !stricmp(argv[i], "-scan"))
+            do_sc = 1;
+        else if (!stricmp(argv[i], "/list") || !stricmp(argv[i], "-list"))
+            do_li = 1;
+        else if (!strnicmp(argv[i], "/auth:", 6))
+            auth_ssid = argv[i] + 6;
+        else if (!strnicmp(argv[i], "/conn:", 6)) {
+            auth_ssid = argv[i] + 6;
+            auth_conn = 1;
+        }
         else if (!strnicmp(argv[i], "/x:", 3))
             fwx_flags = (unsigned)strtoul(argv[i] + 3, NULL, 16);
         else
@@ -288,7 +530,9 @@ int main(int argc, char **argv)
         printf("DosOpen(%s) failed, rc=%lu - is MT7921.OS2 loaded?\n", dev, rc);
         return 1;
     }
-    printf("%s opened\n\nwpa_supplicant probe OIDs:\n", dev);
+    printf("%s opened\n\nwpa_supplicant IsWireless() sequence:\n", dev);
+    wpa_iswireless();
+    printf("\nwpa_supplicant probe OIDs:\n");
 
     show_u32("ISWIRELESS (must be !=0)",   OID_PRIVATE_WRAPPER_ISWIRELESS);
     show_u32("GENMAC_VERSION (>=1.08)",    OID_PRIVATE_WRAPPER_GENMAC_VERSION);
@@ -326,6 +570,12 @@ int main(int argc, char **argv)
         hw_probe();
     if (do_fw)
         fw_boot();
+    if (do_sc)
+        do_scan();
+    if (do_li)
+        do_list();
+    if (auth_ssid)
+        do_auth(auth_ssid, auth_conn);
 
     DosClose(hDev);
     return 0;

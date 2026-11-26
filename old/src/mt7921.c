@@ -27,7 +27,7 @@ typedef unsigned short USHORT;
 typedef unsigned long  ULONG;
 #define FAR __far
 
-#define DRV_VERSION     0x000D          /* 0.13 */
+#define DRV_VERSION     0x0014          /* 0.20 */
 
 /* ------------------------------------------------------------------ */
 /* Request packets                                                     */
@@ -127,6 +127,9 @@ USHORT DH_PhysToVirt(USHORT physHi, USHORT physLo, USHORT len);
 extern void FAR *VirtResult;
 #pragma aux VirtResult "*";
 
+void DH_Sleep(USHORT ms);
+#pragma aux DH_Sleep "*" parm [cx] modify [ax bx cx dx di si es];
+
 void PciCfgRd(USHORT addrHi, USHORT addrLo);
 #pragma aux PciCfgRd "*" parm [ax] [bx];
 void PciCfgWr(USHORT addrHi, USHORT addrLo, USHORT valLo, USHORT valHi);
@@ -180,7 +183,8 @@ static MT7921_INFO  gInfo;
 static USHORT       gLanNumber = 1;
 static int          gQuiet = 0;
 static int          gNoMem = 0;         /* /NOMEM: leave PCI command alone */
-static USHORT       gSels[3];           /* GDT selectors: BAR0, DMA, FW    */
+static USHORT       gSels[4];           /* GDT selectors: BAR0, DMA, FW, DMA2 */
+#define gDma2Sel gSels[3]               /* 2nd 64 KB DMA block: RX ring 4  */
 #define gSel    gSels[0]                /* BAR0 64 KB window (remapped)    */
 #define gDmaSel gSels[1]                /* the 64 KB DMA block             */
 #define gFwSel  gSels[2]                /* window into the firmware image  */
@@ -384,12 +388,12 @@ static void LoadFirmware(char FAR *args);
 #define OFS_FWDL    0x0040      /* TX ring 16 (FWDL)   16 desc        */
 #define OFS_WM      0x0140      /* TX ring 17 (MCU WM) 16 desc        */
 #define OFS_RX0     0x0240      /* RX ring 0  (MCU events) 8 desc     */
-#define OFS_RX2     0x02C0      /* RX ring 2  (data)    4 desc        */
-#define OFS_RX4     0x0300      /* RX ring 4  (WA events) 4 desc      */
+#define OFS_RX2     0x0600      /* RX ring 2  (data)    8 desc        */
+#define OFS_RX4     0x0300      /* RX ring 4 (events + frames) 32 desc */
 #define OFS_CMD     0x1000      /* MCU command buffer (4 KB)          */
 #define OFS_RXB0    0x3000      /* RX0 buffers 8 x 2 KB               */
-#define OFS_RXB2    0x7000      /* RX2 buffers 4 x 2 KB               */
-#define OFS_RXB4    0x9000      /* RX4 buffers 4 x 2 KB               */
+#define OFS_RXB2    0xB000      /* RX2 buffers 8 x 2 KB (to 0xF000)   */
+#define OFS_RXB4    0x0000      /* RX4 buffers 32 x 2 KB, in DMA block 2 */
 #define RX_BUF      2048
 
 #define PATCH_NAME  "WIFI_MT7961_patch_mcu_1_2_hdr.bin"
@@ -397,6 +401,7 @@ static void LoadFirmware(char FAR *args);
 #define FW_MAX_SIZE 0x00400000UL                /* sanity: 4 MB */
 
 static ULONG  gDmaPhys;
+static ULONG  gDma2Phys;
 static ULONG  gFwPhys, gFwSize;
 static USHORT gFwState = FWS_NOT_FOUND;
 static char   gFwPath[160];
@@ -461,6 +466,20 @@ static void InitDma(void)
         return;
     }
     gDmaPhys = p.l;
+
+    /* v0.17: second 64 KB block for the 32 buffers of RX ring 4 */
+    if (DH_AllocPhys(1, 0)) {
+        MsgStr("MT7921.OS2: cannot allocate DMA memory (2)\r\n");
+        MsgFlush();
+        gDmaPhys = 0;
+        return;
+    }
+    p.l = PhysResult;
+    if (DH_PhysToGDTSel(p.w.hi, p.w.lo, 0, gDma2Sel)) {
+        gDmaPhys = 0;
+        return;
+    }
+    gDma2Phys = p.l;
     /* zeroed at task time (FwBoot): a GDT selector is ring 0 only */
 }
 
@@ -570,7 +589,7 @@ static USHORT DoInit(RPH FAR *rph)
     gInfo.DrvVersion = DRV_VERSION;
     gInfo.LanNumber  = gLanNumber;
 
-    MsgStr("\r\nMT7921.OS2 v0.13 - MediaTek MT7921 wireless (phase 3c)\r\n");
+    MsgStr("\r\nMT7921.OS2 v0.20 - MediaTek MT7921 wireless (phase 5b)\r\n");
     MsgFlush();
 
     rc = FindCard();
@@ -597,8 +616,8 @@ static USHORT DoInit(RPH FAR *rph)
     MsgStr(" as lan"); MsgHex(gLanNumber, 1);
     MsgStr("\r\n");
 
-    if (DH_AllocGDTSel((USHORT FAR *)gSels, 3)) {
-        gSels[0] = gSels[1] = gSels[2] = 0;
+    if (DH_AllocGDTSel((USHORT FAR *)gSels, 4)) {
+        gSels[0] = gSels[1] = gSels[2] = gSels[3] = 0;
         MsgStr("MT7921.OS2: no GDT selectors - hardware access disabled\r\n");
     }
     MsgFlush();
@@ -823,20 +842,25 @@ typedef struct {
     ULONG  regs;            /* ring register block in BAR0          */
     USHORT desc;            /* descriptor offset in the DMA block   */
     USHORT n;
-    USHORT bufs;            /* RX: buffer offset in the DMA block   */
+    USHORT bufs;            /* RX: buffer offset in its block       */
     USHORT head;
     USHORT tail;
+    UCHAR  blk2;            /* RX buffers in DMA block 2 (v0.17)    */
 } RING;
+
+#define RING_BSEL(r)  ((r)->blk2 ? gDma2Sel : gDmaSel)
+#define RING_BPHYS(r) ((r)->blk2 ? gDma2Phys : gDmaPhys)
+#define RX_BUF_PTR(r, i) ((UCHAR FAR *)MkFar(RING_BSEL(r), (r)->bufs + (i) * RX_BUF))
 
 static RING rTx0  = { REG_TX_RING_BASE + 0x000, OFS_TX0,  4,  0 };
 static RING rFwdl = { REG_TX_RING_BASE + 0x100, OFS_FWDL, 16, 0 };
 static RING rWm   = { REG_TX_RING_BASE + 0x110, OFS_WM,   16, 0 };
 static RING rRx0  = { REG_RX_RING_BASE + 0x000, OFS_RX0,  8,  OFS_RXB0 };
-static RING rRx2  = { REG_RX_RING_BASE + 0x020, OFS_RX2,  4,  OFS_RXB2 };
-static RING rRx4  = { REG_RX_RING_BASE + 0x040, OFS_RX4,  4,  OFS_RXB4 };
+static RING rRx2  = { REG_RX_RING_BASE + 0x020, OFS_RX2,  8,  OFS_RXB2 };
+static RING rRx4  = { REG_RX_RING_BASE + 0x040, OFS_RX4,  32, OFS_RXB4, 0, 0, 1 };
 
 static UCHAR gSeq;
-static UCHAR gPayload[16];
+static UCHAR gPayload[1200];                    /* hw_scan_req is 1186 bytes */
 static UCHAR gSetQuery = MCU_Q_NA;              /* set_query of next McuSend */
 static UCHAR gEvt[1024];                        /* last matching event       */
 static USHORT gEvtLen;
@@ -904,7 +928,7 @@ static void RingInitRx(RING *r)
     USHORT i, d;
     for (i = 0; i < r->n; i++) {
         d = r->desc + i * 16;
-        DmaWr(d + 0, gDmaPhys + r->bufs + i * RX_BUF);
+        DmaWr(d + 0, RING_BPHYS(r) + r->bufs + i * RX_BUF);
         DmaWrHL(d + 4, RX_BUF, 0);              /* SD_LEN0 = 2048 */
         DmaWr(d + 8, 0);
         DmaWr(d + 12, 0);
@@ -1013,9 +1037,18 @@ static void RxRelease(RING *r)
 /* ---- MCU messages (mt76_connac2_mcu_fill_message, legacy format) -- */
 /* returns the status byte of the response (0..255), 0xFFFF if none,
  * 0xFFFE if the command could not be sent.                           */
+/* message kinds (mt76_connac2_mcu_fill_message) */
+#define MK_LEGACY   0           /* mcu_txd, 64-byte header (CMD / CE)    */
+#define MK_EXT      1           /* mcu_txd with cid 0xED + ext_cid       */
+#define MK_UNI      2           /* uni_txd, 48-byte header               */
+
+static UCHAR gKind = MK_LEGACY;                 /* kind of the next McuSend */
+static UCHAR gExtCid;                           /* ext_cid for MK_EXT       */
+
 static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
 {
-    USHORT total = 64 + plen, i, len, tries;
+    USHORT hdr = (gKind == MK_UNI) ? 48 : 64;
+    USHORT total = hdr + plen, i, len, tries;
     UCHAR FAR *buf = (UCHAR FAR *)MkFar(gDmaSel, OFS_CMD);
     UCHAR seq;
 
@@ -1026,12 +1059,25 @@ static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
     FarZero(buf, 64);
     DmaWrHL(OFS_CMD + 0, 0x4100, total);        /* Q_IDX 0x20, PKT_FMT CMD */
     DmaWrHL(OFS_CMD + 4, 0x8001, 0);            /* LONG_FORMAT, HDR CMD    */
-    DmaWrHL(OFS_CMD + 32, 0x8000, total - 32);  /* pq_id : len            */
-    DmaWrHL(OFS_CMD + 36, (USHORT)(((USHORT)seq << 8) | gSetQuery), /* seq, set_query */
-            (USHORT)(0xA000 | cid));            /* pkt_type 0xa0, cid      */
-    gSetQuery = MCU_Q_NA;                       /* back to the default     */
+    if (gKind == MK_UNI) {
+        /* uni_txd: len, cid (le16) | rsv, pkt_type, frag_n, seq |
+         * checksum, s2d_index, option (UNI_EXT_ACK = ACK|UNI|SET)      */
+        DmaWrHL(OFS_CMD + 32, cid, total - 32);
+        DmaWrHL(OFS_CMD + 36, (USHORT)((USHORT)seq << 8), 0xA000);
+        DmaWrHL(OFS_CMD + 40, 0x0700, 0);
+    } else {
+        UCHAR c = (gKind == MK_EXT) ? 0xED : cid;
+        UCHAR sq = (gKind == MK_EXT) ? MCU_Q_SET : gSetQuery;
+        DmaWrHL(OFS_CMD + 32, 0x8000, total - 32);  /* pq_id : len        */
+        DmaWrHL(OFS_CMD + 36, (USHORT)(((USHORT)seq << 8) | sq), /* seq, set_query */
+                (USHORT)(0xA000 | c));          /* pkt_type 0xa0, cid      */
+        if (gKind == MK_EXT)                    /* ext_cid, ext_cid_ack    */
+            DmaWrHL(OFS_CMD + 40, 0x0100, (USHORT)((USHORT)gExtCid << 8));
+    }
+    gSetQuery = MCU_Q_NA;                       /* back to the defaults    */
+    gKind = MK_LEGACY;
     for (i = 0; i < plen; i++)
-        buf[64 + i] = gPayload[i];
+        buf[hdr + i] = gPayload[i];
 
     if (TxSend(&rWm, gDmaPhys + OFS_CMD, total))
         return 0xFFFE;
@@ -1044,7 +1090,7 @@ static USHORT McuSend(UCHAR cid, USHORT plen, int wait)
         len = RxWait(&rr);
         if (!len)
             return 0xFFFF;
-        ev = (UCHAR FAR *)MkFar(gDmaSel, rr->bufs + rr->tail * RX_BUF);
+        ev = RX_BUF_PTR(rr, rr->tail);
         gBoot.LastEvtLen = len;
         FarCopy((UCHAR FAR *)gBoot.LastEvt, ev + 24, 24);
         if (len >= 33 && ev[29] == seq) {
@@ -1545,6 +1591,8 @@ static void Reattach(void)
 
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0x8000), 0x8000);
     RingInitTx(&rTx0);
     Wr(REG_TX_EXT_CTRL, 0x00000004UL);
     RingInitTx(&rWm);
@@ -1631,6 +1679,8 @@ static void FwBoot(void)
     }
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0), 0x8000);
     FarZero((UCHAR FAR *)MkFar(gDmaSel, 0x8000), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0), 0x8000);
+    FarZero((UCHAR FAR *)MkFar(gDma2Sel, 0x8000), 0x8000);
     gSeq = 0;
 
     /* patch header (mt76_connac2_patch_hdr, big endian) */
@@ -1800,6 +1850,1128 @@ release:
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Phase 4a: first scan (OID_PRIVATE_MT7921_SCAN)                      */
+/* Same order as Linux: init_hardware (EFUSE_BUFFER_MODE), start       */
+/* (MAC_INIT_CTRL), add_interface (DEV_INFO + BSS_INFO), hw_scan.      */
+/* ------------------------------------------------------------------ */
+#define MCU_EXT_CMD_EFUSE_BUFFER_MODE   0x21
+#define MCU_EXT_CMD_MAC_INIT_CTRL       0x46
+#define MCU_UNI_CMD_DEV_INFO_UPDATE     0x01
+#define MCU_UNI_CMD_BSS_INFO_UPDATE     0x02
+#define MCU_CE_CMD_START_HW_SCAN        0x03
+#define MCU_EVENT_SCAN_DONE             0x0D
+#define MCU_CE_CMD_SET_CHAN_DOMAIN      0x0F
+#define MCU_EXT_CMD_SET_RX_PATH         0x4E
+#define MCU_UNI_CMD_STA_REC_UPDATE      0x03
+#define MCU_UNI_CMD_ROC                 0x27
+#define MCU_UNI_EVENT_ROC               0x27
+
+/* channel list for SET_CHAN_DOMAIN (country NL): hw_value, flags.
+ * flags are mac80211 channel flags: NO_IR = 0x02, RADAR = 0x08      */
+static const UCHAR gCh2g[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13 };
+static const UCHAR gCh5g[] = { 36,40,44,48, 52,56,60,64,
+                               100,104,108,112,116,120,124,128,132,136,140 };
+
+#define SCAN_LIMIT      8000000UL       /* polls, roughly 8+ seconds */
+
+static MT7921_SCAN gScan;
+
+static void PayloadZero(USHORT n)
+{
+    USHORT i;
+    for (i = 0; i < n; i++) gPayload[i] = 0;
+}
+
+static ULONG EvtLe32(USHORT o)
+{
+    union { ULONG l; UCHAR b[4]; } u;
+    u.b[0] = gEvt[o]; u.b[1] = gEvt[o + 1]; u.b[2] = gEvt[o + 2]; u.b[3] = gEvt[o + 3];
+    return u.l;
+}
+
+static int Scn(USHORT step, USHORT err)
+{
+    gScan.Step = step;
+    gScan.Error = err;
+    return err;
+}
+
+static USHORT ScnErr(USHORT st)
+{
+    return st == 0xFFFE ? SCN_ERR_TX : SCN_ERR_NO_EVENT;
+}
+
+/* ---- BSS table (v0.17) -------------------------------------------- */
+#define MAX_BSS     32
+#define MAX_IES     400
+
+typedef struct {
+    UCHAR  bssid[6];
+    UCHAR  ch;
+    signed char rssi;               /* dBm                             */
+    UCHAR  tsf[8];
+    USHORT bint;                    /* beacon interval                 */
+    USHORT cap;                     /* capability information          */
+    USHORT ielen;
+    UCHAR  ssidlen;
+    char   ssid[32];
+    UCHAR  ies[MAX_IES];            /* variable IEs (after fixed part) */
+} BSSE;
+
+static BSSE   gBss[MAX_BSS];
+static USHORT gNBss;
+static int    gScanReady;                       /* ScanPrep done       */
+static int    gHwBusy;                          /* FwBoot / scan active */
+
+/* ---- phase 5a: authentication test state ------------------------- */
+static MT7921_AUTH gAuth;
+static int    gAuthRun;                         /* record frames to us */
+static UCHAR  gRocToken;
+
+static int IsOurMac(UCHAR FAR *a)
+{
+    USHORT i;
+    for (i = 0; i < 6; i++)
+        if (a[i] != gMac[i]) return 0;
+    return 1;
+}
+
+/* ---- v0.20: connection state ------------------------------------ */
+static int    gConnected;
+static UCHAR  gBssid[6];
+static UCHAR  gConnCh;
+static int    gRocHeld;
+static UCHAR  gReqIes[160];                     /* assoc request IEs   */
+static USHORT gReqIeLen;
+static UCHAR  gRespIes[256];                    /* assoc response IEs  */
+static USHORT gRespIeLen;
+static USHORT gReqCap, gRespCap;
+
+/* EAPOL frames for OID_PRIVATE_WRAPPER_802_1X_RX (Ethernet format) */
+#define EQ_N    4
+#define EQ_SZ   600
+static UCHAR  gEq[EQ_N][EQ_SZ];
+static USHORT gEqLen[EQ_N];
+static USHORT gEqHead, gEqCount;
+static ULONG  gEapolRx, gEapolTx;
+
+static void EapolIn(UCHAR FAR *dst, UCHAR FAR *src, UCHAR FAR *body, USHORT n)
+{
+    UCHAR *q;
+    USHORT i, slot;
+    if (n + 14 > EQ_SZ || gEqCount >= EQ_N) return;
+    slot = (gEqHead + gEqCount) % EQ_N;
+    q = gEq[slot];
+    for (i = 0; i < 6; i++) { q[i] = dst[i]; q[6 + i] = src[i]; }
+    q[12] = 0x88; q[13] = 0x8E;
+    for (i = 0; i < n; i++) q[14 + i] = body[i];
+    gEqLen[slot] = n + 14;
+    gEqCount++;
+    gEapolRx++;
+}
+
+/* management frame addressed to us (auth, assoc resp, deauth ...) */
+static void OwnFrame(UCHAR FAR *f, USHORT n)
+{
+    USHORT i;
+    if (gAuth.RxFrames < 8) {
+        gAuth.Fc[gAuth.RxFrames] = f[0];
+        gAuth.FcFlags[gAuth.RxFrames] = f[1];
+        gAuth.Seq[gAuth.RxFrames] = (USHORT)(f[22] | ((USHORT)f[23] << 8));
+    }
+    gAuth.RxFrames++;
+    if (f[0] == 0xB0 && n >= 30) {              /* authentication */
+        gAuth.AuthAlg    = (USHORT)(f[24] | ((USHORT)f[25] << 8));
+        gAuth.AuthSeq    = (USHORT)(f[26] | ((USHORT)f[27] << 8));
+        gAuth.AuthStatus = (USHORT)(f[28] | ((USHORT)f[29] << 8));
+    } else if ((f[0] == 0x10 || f[0] == 0x30) && n >= 30 &&
+               gAuth.AssocStatus == 0xFFFF) {   /* (re)assoc response */
+        gRespCap         = (USHORT)(f[24] | ((USHORT)f[25] << 8));
+        gAuth.AssocStatus = (USHORT)(f[26] | ((USHORT)f[27] << 8));
+        gAuth.Aid        = (USHORT)((f[28] | ((USHORT)f[29] << 8)) & 0x3FFF);
+        gRespIeLen = n - 30;
+        if (gRespIeLen > sizeof(gRespIes)) gRespIeLen = sizeof(gRespIes);
+        for (i = 0; i < gRespIeLen; i++) gRespIes[i] = f[30 + i];
+    } else if ((f[0] == 0xC0 || f[0] == 0xA0) && gConnected) {
+        for (i = 0; i < 6 && f[10 + i] == gBssid[i]; i++) ;
+        if (i == 6) gConnected = 0;             /* deauth / disassoc */
+    }
+}
+
+/* data frame to us: keep EAPOL (LLC/SNAP 88 8E) for wpa_supplicant */
+static void DataFrame(UCHAR FAR *f, USHORT n, int trans)
+{
+    USHORT h;
+    if (trans) {                                /* already 802.3      */
+        if (n > 14 && f[12] == 0x88 && f[13] == 0x8E)
+            EapolIn(f, f + 6, f + 14, n - 14);
+        return;
+    }
+    h = 24;
+    if (f[0] & 0x80) {                          /* QoS data           */
+        h += 2;
+        if (f[1] & 0x80) h += 4;                /* +HTC               */
+    }
+    if (n < h + 8) return;
+    if (f[h] != 0xAA || f[h + 1] != 0xAA || f[h + 2] != 0x03 ||
+        f[h + 6] != 0x88 || f[h + 7] != 0x8E)
+        return;
+    /* from the AP (FromDS): DA = addr1, SA = addr3 */
+    EapolIn(f + 4, f + 16, f + h + 8, n - h - 8);
+}
+
+/* RX descriptor of a frame (mt7921_mac_fill_rx): 6 dwords, then the
+ * optional groups 4 (16 bytes), 1 (16), 2 (8), 3 (8, RXV with RCPI),
+ * 5 (96); then 2 * HDR_OFFSET pad bytes; then the 802.11 header.
+ * rxd1 bits 11..15 = groups 1,2,3,4,5 (byte 5, bits 3..7)           */
+static void ParseFrame(UCHAR FAR *b, USHORT len)
+{
+    USHORT hdr = 24, v1 = 0xFFFF, p, i, n;
+    UCHAR g = b[5], rcpi;
+    int rssi;
+    BSSE *e = 0;
+
+    if (len < 48) return;
+    if (g & 0x40) hdr += 16;                    /* group 4 */
+    if (g & 0x08) hdr += 16;                    /* group 1 */
+    if (g & 0x10) hdr += 8;                     /* group 2 */
+    if (g & 0x20) {                             /* group 3: RXV */
+        v1 = hdr + 4;
+        hdr += 8;
+        if (g & 0x80) {                         /* group 5 */
+            hdr += 24;
+            v1 = hdr;
+            hdr += 48;
+        }
+    }
+    hdr += 2 * (b[9] >> 6);                     /* rxd2 HDR_OFFSET */
+    if (hdr + 24 > len) return;
+
+    /* v0.20: header translated by the hardware (802.3 frame) */
+    if (b[9] & 0x20) {
+        if (gConnected && IsOurMac(b + hdr))
+            DataFrame(b + hdr, len - hdr, 1);
+        return;
+    }
+    /* v0.19: management frames to our own address */
+    if ((gAuthRun || gConnected) && (b[hdr] & 0x0C) == 0 && IsOurMac(b + hdr + 4)) {
+        OwnFrame(b + hdr, len - hdr);
+        return;
+    }
+    if ((b[hdr] & 0x0C) == 0x08) {              /* data */
+        if (gConnected && IsOurMac(b + hdr + 4))
+            DataFrame(b + hdr, len - hdr, 0);
+        return;
+    }
+    if (hdr + 36 > len) return;
+
+    /* beacon (80 00) or probe response (50 00) */
+    if ((b[hdr] != 0x80 && b[hdr] != 0x50) || b[hdr + 1] != 0)
+        return;
+    gScan.Beacons++;
+
+    for (i = 0; i < gNBss; i++) {
+        USHORT k;
+        for (k = 0; k < 6 && gBss[i].bssid[k] == b[hdr + 16 + k]; k++) ;
+        if (k == 6) { e = &gBss[i]; break; }
+    }
+    if (!e) {
+        if (gNBss >= MAX_BSS) return;
+        e = &gBss[gNBss++];
+        for (i = 0; i < 6; i++) e->bssid[i] = b[hdr + 16 + i];
+    }
+
+    e->ch = b[13];                              /* rxd3 CH_FREQ    */
+    rssi = -127;
+    if (v1 != 0xFFFF) {
+        rcpi = b[v1] > b[v1 + 1] ? b[v1] : b[v1 + 1];
+        rssi = ((int)rcpi - 220) / 2;           /* to_rssi()       */
+    }
+    e->rssi = (signed char)rssi;
+    for (i = 0; i < 8; i++) e->tsf[i] = b[hdr + 24 + i];
+    e->bint = (USHORT)(b[hdr + 32] | ((USHORT)b[hdr + 33] << 8));
+    e->cap  = (USHORT)(b[hdr + 34] | ((USHORT)b[hdr + 35] << 8));
+
+    n = len - (hdr + 36);
+    if (n > MAX_IES) n = MAX_IES;
+    FarCopy((UCHAR FAR *)e->ies, b + hdr + 36, n);
+    e->ielen = n;
+
+    for (p = 0; p + 2 <= n; ) {
+        UCHAR id = e->ies[p], l = e->ies[p + 1];
+        if (p + 2 + l > n) break;
+        if (id == 0) {
+            e->ssidlen = l > 32 ? 32 : l;
+            for (i = 0; i < e->ssidlen; i++) e->ssid[i] = (char)e->ies[p + 2 + i];
+        } else if (id == 3 && l >= 1 && !e->ch) {
+            e->ch = e->ies[p + 2];
+        }
+        p += 2 + l;
+    }
+}
+
+/* one RX buffer from ring 0/4: event or (pkt type 7, flag 1) frame */
+static void RxBuffer(RING *r, USHORT len)
+{
+    UCHAR FAR *ev = RX_BUF_PTR(r, r->tail);
+    UCHAR type = (UCHAR)(ev[3] >> 3);
+    if (len > RX_BUF) len = RX_BUF;
+    if (type == 2 || (type == 7 && (ev[2] & 0x0F) == 1)) { /* NORMAL(_MCU) frame */
+        if (gScan.Events == 0) {
+            gScan.FirstLen = len;
+            FarCopy((UCHAR FAR *)gScan.FirstFrame, ev, len < 64 ? len : 64);
+        }
+        gScan.Events++;
+        ParseFrame(ev, len);
+    } else if (gAuthRun && ev[28] == MCU_UNI_EVENT_ROC && len >= 50) {
+        gAuth.RocGranted = 1;                   /* grant tlv at +40   */
+        gAuth.RocStatus  = ev[46];
+        gAuth.RocChannel = ev[47];
+        gAuth.RocBand    = ev[49];
+    } else if (ev[28] == MCU_EVENT_SCAN_DONE) {
+        gScan.ScanDone = 1;
+        FarCopy((UCHAR FAR *)gScan.DoneEvt, ev + 36, 48);
+    } else {
+        if (gScan.Frames < 8)                   /* reuse: other events */
+            gScan.EvtIds[(USHORT)gScan.Frames] = ev[28];
+        gScan.Frames++;
+        if (gAuthRun) {
+            if (gAuth.RxOther < 8)
+                gAuth.EvtIds[gAuth.RxOther] = type == 7 ? ev[28] : (UCHAR)(0xF0 | type);
+            gAuth.RxOther++;
+        }
+    }
+    RxRelease(r);
+}
+
+/* drain all completed RX buffers of rings 0, 4 and 2; returns count  */
+static USHORT RxDrain(void)
+{
+    static RING *rr[3] = { &rRx4, &rRx0, &rRx2 };
+    USHORT got = 0;
+    int k;
+    U32W c;
+
+    for (k = 0; k < 3; k++) {
+        RING *r = rr[k];
+        for (;;) {
+            c.l = DmaRd(r->desc + r->tail * 16 + 4);
+            if (!(c.w.hi & DESC_DMA_DONE_HI)) break;
+            RxBuffer(r, (USHORT)(c.w.hi & 0x3FFF));
+            got++;
+        }
+    }
+    return got;
+}
+
+/* wait for SCAN_DONE; sleep 16 ms between polls so OS/2 keeps running */
+static void ScanCollect(void)
+{
+    USHORT t;
+    for (t = 0; t < 600 && !gScan.ScanDone; t++) {   /* ~10 s max */
+        RxDrain();
+        if (gScan.ScanDone) break;
+        DH_Sleep(16);
+    }
+    RxDrain();
+    gScan.Polls = t;
+}
+
+/* once per firmware start: EFUSE mode .. BSS_INFO (Linux init_hardware,
+ * start and add_interface)                                           */
+static void ScanPrep(void)
+{
+    USHORT st, i;
+
+    /* 1. mt7921_mcu_set_eeprom: buffer_mode EFUSE, format WHOLE */
+    PayloadZero(4);
+    gPayload[1] = 1;                            /* EE_FORMAT_WHOLE  */
+    gKind = MK_EXT; gExtCid = MCU_EXT_CMD_EFUSE_BUFFER_MODE;
+    st = McuSend(0xED, 4, 1);
+    gScan.StEfuse = st;
+    if (st >= 0xFFFE) { Scn(SCN_STEP_EFUSE, ScnErr(st)); return; }
+
+    /* 2. mt76_connac_mcu_set_mac_enable(band 0, enable) */
+    PayloadZero(4);
+    gPayload[0] = 1;
+    gKind = MK_EXT; gExtCid = MCU_EXT_CMD_MAC_INIT_CTRL;
+    st = McuSend(0xED, 4, 1);
+    gScan.StMacEn = st;
+    if (st >= 0xFFFE) { Scn(SCN_STEP_MAC_EN, ScnErr(st)); return; }
+
+    /* 2a. SET_CHAN_DOMAIN: hdr { alpha2[4], bw_2g, bw_5g, bw_6g, pad,
+     *     n_2ch, n_5ch, n_6ch, pad2 }, { le16 ch, le16 pad, le32 flags } */
+    {
+        USHORT p = 12, k;
+        PayloadZero(12 + (sizeof(gCh2g) + sizeof(gCh5g)) * 8);
+        gPayload[0] = 'N'; gPayload[1] = 'L';
+        gPayload[5] = 3;
+        gPayload[6] = 3;
+        gPayload[8] = sizeof(gCh2g);
+        gPayload[9] = sizeof(gCh5g);
+        for (k = 0; k < sizeof(gCh2g); k++, p += 8)
+            gPayload[p] = gCh2g[k];
+        for (k = 0; k < sizeof(gCh5g); k++, p += 8) {
+            gPayload[p] = gCh5g[k];
+            if (gCh5g[k] >= 52)
+                gPayload[p + 4] = 0x0A;         /* NO_IR | RADAR */
+        }
+        gSetQuery = MCU_Q_SET;
+        st = McuSend(MCU_CE_CMD_SET_CHAN_DOMAIN, p, 0);
+        gScan.StChanDom = st;
+        if (st >= 0xFFFE) { Scn(SCN_STEP_CHAN_DOM, SCN_ERR_TX); return; }
+    }
+
+    /* 2b. SET_RX_PATH: channel 1, 20 MHz, 2 TX streams, RX mask 3 */
+    PayloadZero(76);
+    gPayload[0] = 1; gPayload[1] = 1; gPayload[3] = 2; gPayload[4] = 3;
+    gKind = MK_EXT; gExtCid = MCU_EXT_CMD_SET_RX_PATH;
+    st = McuSend(0xED, 76, 1);
+    gScan.StRxPath = st;
+    if (st >= 0xFFFE) { Scn(SCN_STEP_RX_PATH, ScnErr(st)); return; }
+
+    /* 3. DEV_INFO_UPDATE */
+    PayloadZero(16);
+    gPayload[6] = 12;                           /* tlv len    */
+    gPayload[8] = 1;                            /* active     */
+    for (i = 0; i < 6; i++) gPayload[10 + i] = gMac[i];
+    gKind = MK_UNI;
+    st = McuSend(MCU_UNI_CMD_DEV_INFO_UPDATE, 16, 1);
+    if (st >= 0xFFFE) { Scn(SCN_STEP_DEV_INFO, ScnErr(st)); return; }
+    gScan.DevUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+
+    /* 4. BSS_INFO_UPDATE (basic, station) */
+    PayloadZero(36);
+    gPayload[6] = 32;
+    gPayload[8] = 1;
+    gPayload[12] = 0x01; gPayload[14] = 0x01;   /* CONNECTION_INFRA_STA */
+    gPayload[16] = 1;
+    gKind = MK_UNI;
+    st = McuSend(MCU_UNI_CMD_BSS_INFO_UPDATE, 36, 1);
+    if (st >= 0xFFFE) { Scn(SCN_STEP_BSS_INFO, ScnErr(st)); return; }
+    gScan.BssUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+
+    gScanReady = 1;
+}
+
+/* hw_scan + collect into gBss[] */
+static void ScanRun(void)
+{
+    USHORT st, i;
+    static UCHAR seq;
+
+    gNBss = 0;
+    RxDrain();                                  /* old events away */
+
+    PayloadZero(1186);
+    seq = (UCHAR)((seq + 1) & 0x7F);
+    if (!seq) seq = 1;
+    gPayload[0] = seq;                          /* seq_num, band 0    */
+    gPayload[3] = 0x01;                         /* wildcard SSID      */
+    gPayload[6] = 0x20;                         /* SCAN_FUNC_SPLIT_SCAN */
+    gPayload[7] = 1;                            /* version            */
+    for (i = 0; i < 6; i++) gPayload[1110 + i] = 0xFF;
+    gSetQuery = MCU_Q_SET;
+    st = McuSend(MCU_CE_CMD_START_HW_SCAN, 1186, 0);
+    gScan.StScan = st;
+    if (st >= 0xFFFE) { Scn(SCN_STEP_HW_SCAN, SCN_ERR_TX); return; }
+
+    ScanCollect();
+    if (!gScan.ScanDone) { Scn(SCN_STEP_COLLECT, SCN_ERR_NO_DONE); return; }
+    Scn(SCN_STEP_DONE, SCN_OK);
+}
+
+static void ScanReset(void)
+{
+    FarZero((UCHAR FAR *)&gScan, sizeof(gScan));
+    gScan.Magic = MT7921_SCAN_MAGIC;
+    gScan.StEfuse = gScan.StMacEn = gScan.StScan = 0xFFFF;
+    gScan.StChanDom = gScan.StRxPath = 0xFFFF;
+    gScan.DevUni = gScan.BssUni = 0xFFFFFFFFUL;
+}
+
+/* full path used by BSSID_LIST_SCAN and /scan: firmware, prep, scan */
+static void DoScan(void)
+{
+    USHORT i, k;
+
+    ScanReset();
+    if (!gFwRunning) {
+        gFwx = 0;
+        FwBoot();
+    }
+    if (!gFwRunning) { Scn(SCN_STEP_START, SCN_ERR_NO_FW); return; }
+    if (!gScanReady) {
+        ScanPrep();
+        if (!gScanReady) return;
+    } else {
+        gScan.StEfuse = gScan.StMacEn = gScan.StRxPath = 0;  /* done before */
+        gScan.StChanDom = 0;
+        gScan.DevUni = gScan.BssUni = 0;
+    }
+    ScanRun();
+
+    /* summary for wrndtest /scan */
+    gScan.NBss = gNBss;
+    for (i = 0; i < gNBss && i < SCAN_MAX_BSS; i++) {
+        MT7921_BSS *d = &gScan.Bss[i];
+        for (k = 0; k < 6; k++) d->Bssid[k] = gBss[i].bssid[k];
+        d->Channel = gBss[i].ch;
+        d->SsidLen = gBss[i].ssidlen;
+        for (k = 0; k < 32; k++) d->Ssid[k] = gBss[i].ssid[k];
+        gScan.Rssi[i] = gBss[i].rssi;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 5a: authentication test (OID_PRIVATE_MT7921_AUTH)             */
+/* Linux order (mac80211 + mt7921): sta_add -> STA_REC_UPDATE for the  */
+/* AP (state NONE), mgd_prepare_tx -> ROC JOIN on the AP channel, then */
+/* the auth frame goes out on the data ring with a connac2 TXD + TXP.  */
+/* ------------------------------------------------------------------ */
+#define OFS_TXF     0x1800      /* TXD + TXP + 802.11 frame (in CMD area) */
+#define AP_WCID     1
+
+static int Aut(USHORT step, USHORT err)
+{
+    gAuth.Step = step;
+    gAuth.Error = err;
+    return err;
+}
+
+static void PutLe16(USHORT at, USHORT v)
+{
+    gPayload[at] = (UCHAR)v;
+    gPayload[at + 1] = (UCHAR)(v >> 8);
+}
+
+static UCHAR gPrefBssid[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+/* the BSS wpa_supplicant asked for, else the strongest with the SSID */
+static BSSE *AuthPick(void)
+{
+    BSSE *best = 0;
+    USHORT i, k;
+    for (i = 0; i < gNBss; i++) {
+        BSSE *e = &gBss[i];
+        if (e->ssidlen != gAuth.SsidLen) continue;
+        for (k = 0; k < e->ssidlen && e->ssid[k] == gAuth.Ssid[k]; k++) ;
+        if (k != e->ssidlen) continue;
+        for (k = 0; k < 6 && e->bssid[k] == gPrefBssid[k]; k++) ;
+        if (k == 6) return e;
+        if (!best || e->rssi > best->rssi) best = e;
+    }
+    return best;
+}
+
+/* AP advertises WMM (vendor IE 00:50:F2 type 2) */
+static UCHAR HasWmm(BSSE *e)
+{
+    USHORT p;
+    for (p = 0; p + 2 <= e->ielen; p += 2 + e->ies[p + 1]) {
+        UCHAR FAR *ie = (UCHAR FAR *)e->ies + p;
+        if (p + 2 + ie[1] > e->ielen) break;
+        if (ie[0] == 221 && ie[1] >= 5 && ie[2] == 0x00 && ie[3] == 0x50 &&
+            ie[4] == 0xF2 && ie[5] == 2)
+            return 1;
+    }
+    return 0;
+}
+
+/* mt7921_mcu_sta_update(sta = AP, enable, STATE_NONE): sta_req_hdr +
+ * BASIC, PHY, RA, STATE, WTBL{wtbl_req_hdr, GENERIC, RX, HDR_TRANS}  */
+static USHORT StaRec(BSSE *e, UCHAR state, USHORT aid)
+{
+    USHORT i, p;
+    UCHAR g5 = e->ch > 14;
+
+    PayloadZero(120);
+    gPayload[0] = 0;                            /* bss_idx          */
+    gPayload[1] = AP_WCID;                      /* wlan_idx_lo      */
+    PutLe16(2, 5);                              /* tlv_num          */
+    gPayload[4] = 1;                            /* is_tlv_append    */
+    gPayload[5] = 0;                            /* muar_idx = omac  */
+
+    p = 8;                                      /* STA_REC_BASIC    */
+    PutLe16(p, 0); PutLe16(p + 2, 20);
+    PutLe32(p + 4, 0x00010002UL);               /* CONNECTION_INFRA_AP */
+    gPayload[p + 8] = 2;                        /* CONN_STATE_PORT_SECURE */
+    gPayload[p + 9] = HasWmm(e);                /* qos              */
+    for (i = 0; i < 6; i++) gPayload[p + 12 + i] = e->bssid[i];
+    PutLe16(p + 10, state ? aid : 0);
+    PutLe16(p + 18, state ? 1 : 3);             /* EXTRA_INFO_VER(|NEW) */
+
+    p += 20;                                    /* STA_REC_PHY      */
+    PutLe16(p, 0x15); PutLe16(p + 2, 12);
+    PutLe16(p + 4, g5 ? 0x0015 : 0x000F);       /* basic rates      */
+    gPayload[p + 6] = g5 ? 0x08 : 0x03;         /* OFDM | HR_DSSS + ERP */
+
+    p += 12;                                    /* STA_REC_RA       */
+    PutLe16(p, 1); PutLe16(p + 2, 16);
+    PutLe16(p + 4, g5 ? 0x3FC0 : 0x3FCF);       /* legacy OFDM | CCK */
+
+    p += 16;                                    /* STA_REC_STATE    */
+    PutLe16(p, 7); PutLe16(p + 2, 12);
+    gPayload[p + 8] = state;                    /* 0 NONE, 2 ASSOC  */
+
+    p += 12;                                    /* STA_REC_WTBL     */
+    PutLe16(p, 13); PutLe16(p + 2, 52);
+    gPayload[p + 4] = AP_WCID;                  /* wtbl_req_hdr     */
+    gPayload[p + 5] = 1;                        /* WTBL_RESET_AND_SET */
+    PutLe16(p + 6, 3);                          /* nested tlv_num   */
+    p += 12;                                    /* WTBL_GENERIC     */
+    PutLe16(p, 0); PutLe16(p + 2, 20);
+    for (i = 0; i < 6; i++) gPayload[p + 4 + i] = e->bssid[i];
+    gPayload[p + 13] = HasWmm(e);               /* qos              */
+    PutLe16(p + 16, aid);                       /* partial_aid      */
+    p += 20;                                    /* WTBL_RX          */
+    PutLe16(p, 1); PutLe16(p + 2, 12);
+    gPayload[p + 5] = 1; gPayload[p + 6] = 1; gPayload[p + 7] = 1;
+    p += 12;                                    /* WTBL_HDR_TRANS   */
+    PutLe16(p, 6); PutLe16(p + 2, 8);
+    gPayload[p + 4] = 1;                        /* to_ds            */
+    gPayload[p + 6] = 1;                        /* no_rx_trans      */
+    p += 8;                                     /* = 120            */
+
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_STA_REC_UPDATE, p, 1);
+}
+
+/* UNI ROC acquire (JOIN) / abort */
+static USHORT RocCmd(UCHAR acquire, UCHAR ch, USHORT ms)
+{
+    PayloadZero(28);
+    if (acquire) {
+        PutLe16(4, 0); PutLe16(6, 24);          /* UNI_ROC_ACQUIRE  */
+        gPayload[9]  = gRocToken;
+        gPayload[10] = ch;                      /* control channel  */
+        gPayload[12] = ch > 14 ? 2 : 1;         /* band             */
+        gPayload[14] = ch;                      /* center_chan      */
+        gPayload[17] = ch;                      /* center_chan_from_ap */
+        gPayload[19] = 0;                       /* MT7921_ROC_REQ_JOIN */
+        PutLe32(20, ms);
+        gPayload[24] = 0xFF;                    /* dbdcband auto    */
+        gKind = MK_UNI;
+        return McuSend(MCU_UNI_CMD_ROC, 28, 0);
+    }
+    PutLe16(4, 1); PutLe16(6, 12);              /* UNI_ROC_ABORT    */
+    gPayload[9]  = gRocToken;
+    gPayload[10] = 0xFF;
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_ROC, 16, 0);
+}
+
+static void PutFarLe32(UCHAR FAR *b, ULONG v)
+{
+    union { ULONG l; UCHAR c[4]; } u;
+    u.l = v;
+    b[0] = u.c[0]; b[1] = u.c[1]; b[2] = u.c[2]; b[3] = u.c[3];
+}
+
+/* connac2 TXD (32) + hw TXP (32) + frame, queued on TX ring 0.
+ * The caller writes the 802.11 frame at TxBuf() first.              */
+static UCHAR FAR *TxBuf(void)
+{
+    return (UCHAR FAR *)MkFar(gDmaSel, OFS_TXF + 64);
+}
+
+static int TxGo(USHORT n, UCHAR ch, UCHAR wcid)
+{
+    UCHAR FAR *b = (UCHAR FAR *)MkFar(gDmaSel, OFS_TXF);
+    UCHAR fc = b[64];
+    UCHAR ftype = (UCHAR)((fc >> 2) & 3), stype = (UCHAR)(fc >> 4);
+    ULONG q = ftype == 2 ? 3UL : 0x10UL;        /* data: AC_VO, mgmt: ALTX0 */
+
+    FarZero(b, 64);
+    /* dw0: TX_BYTES, PKT_FMT CT (0), Q_IDX */
+    PutFarLe32(b + 0,  (ULONG)(n + 32) | (q << 25));
+    /* dw1: LONG_FORMAT, HDR_FORMAT 802.11, HDR_INFO 24/2, WLAN_IDX */
+    PutFarLe32(b + 4,  0x80020000UL | (12UL << 11) | wcid);
+    /* dw2: FIX_RATE, HTC_VLD, frame type, sub type */
+    PutFarLe32(b + 8,  0x80002000UL | ((ULONG)ftype << 4) | stype);
+    /* dw3: BA_DISABLE, REM_TX_COUNT 15 */
+    PutFarLe32(b + 12, 0x10000000UL | (15UL << 11));
+    /* dw6: FIXED_BW, rate CCK 1M (2.4 GHz) or OFDM 6M (5 GHz) */
+    PutFarLe32(b + 24, 0x00000004UL | ((ch > 14 ? 0x4BUL : 0x00UL) << 16));
+    /* dw7: SPE_IDX 24, sub type, type */
+    PutFarLe32(b + 28, (24UL << 11) | ((ULONG)stype << 16) | ((ULONG)ftype << 20));
+    /* hw TXP: msdu_id[0] = token 1 | VALID, ptr[0] = frame, LAST */
+    b[32] = 0x01; b[33] = 0x80;
+    PutFarLe32(b + 40, gDmaPhys + OFS_TXF + 64);
+    b[44] = (UCHAR)n; b[45] = (UCHAR)(0x80 | (n >> 8));
+
+    return TxSend(&rTx0, gDmaPhys + OFS_TXF, 64);
+}
+
+/* 24-byte management header to the AP */
+static UCHAR FAR *MgmtHdr(UCHAR fc, UCHAR *bssid)
+{
+    UCHAR FAR *f = TxBuf();
+    USHORT i;
+    FarZero(f, 24);
+    f[0] = fc;
+    for (i = 0; i < 6; i++) {
+        f[4 + i]  = bssid[i];
+        f[10 + i] = gMac[i];
+        f[16 + i] = bssid[i];
+    }
+    return f;
+}
+
+/* mt792x_mac_set_timeing: CCK/OFDM timeouts, SIFS and slot time */
+static void SetTiming(UCHAR ch, int shortSlot)
+{
+    ULONG icr = 0x00000968UL;                   /* EIFS 360, RIFS 2 */
+    icr |= ch > 14 ? 0x00100000UL : 0x000A0000UL;          /* SIFS */
+    icr |= (ch > 14 || shortSlot) ? 0x09000000UL : 0x14000000UL;
+    Wr(0x00020C80UL, Rd(0x00020C80UL) | 0x300UL);  /* ARB_SCR: TX/RX off */
+    Wr(0x00021090UL, 0x003000E7UL);             /* TMAC_CDTR        */
+    Wr(0x00021094UL, 0x001C003CUL);             /* TMAC_ODTR        */
+    Wr(0x000210A4UL, icr);                      /* TMAC_ICR0        */
+    Wr(0x00020C80UL, Rd(0x00020C80UL) & ~0x300UL);
+}
+
+/* offset of an IE in the BSS entry, FFFF = absent. For id 221 the
+ * first 4 body bytes (OUI + type) must match oui4.                   */
+static USHORT FindIe(BSSE *e, UCHAR id, const UCHAR *oui4)
+{
+    USHORT p;
+    for (p = 0; p + 2 <= e->ielen; p += 2 + e->ies[p + 1]) {
+        if (p + 2 + e->ies[p + 1] > e->ielen) break;
+        if (e->ies[p] != id) continue;
+        if (!oui4) return p;
+        if (e->ies[p + 1] >= 4 && e->ies[p + 2] == oui4[0] &&
+            e->ies[p + 3] == oui4[1] && e->ies[p + 4] == oui4[2] &&
+            e->ies[p + 5] == oui4[3])
+            return p;
+    }
+    return 0xFFFF;
+}
+
+static const UCHAR gOuiWpa[4] = { 0x00, 0x50, 0xF2, 0x01 };
+
+static void AddIe(UCHAR id, const UCHAR *d, UCHAR n)
+{
+    UCHAR i;
+    if (gReqIeLen + 2 + n > sizeof(gReqIes)) return;
+    gReqIes[gReqIeLen++] = id;
+    gReqIes[gReqIeLen++] = n;
+    for (i = 0; i < n; i++) gReqIes[gReqIeLen++] = d[i];
+}
+
+/* IEs of the association request: SSID, rates, WPA/RSN, WMM */
+static void BuildAssocIes(BSSE *e)
+{
+    static UCHAR ie[26];
+    USHORT p, i;
+    UCHAR grp[4], pair, akm, wpa2;
+
+    gReqIeLen = 0;
+    AddIe(0, (UCHAR *)e->ssid, e->ssidlen);
+    p = FindIe(e, 1, 0);
+    if (p != 0xFFFF) AddIe(1, e->ies + p + 2, e->ies[p + 1]);
+    p = FindIe(e, 50, 0);
+    if (p != 0xFFFF) AddIe(50, e->ies + p + 2, e->ies[p + 1]);
+
+    /* NDIS auth modes: 3 WPA, 4 WPAPSK, 6 WPA2, 7 WPA2PSK */
+    if (gAuthMode >= 3 && gAuthMode != 5) {
+        wpa2 = gAuthMode >= 6;
+        pair = gEncStatus == 4 || gEncStatus == 5 ? 2 : 4;   /* TKIP : CCMP */
+        akm  = (gAuthMode == 4 || gAuthMode == 7) ? 2 : 1;   /* PSK : 802.1X */
+        grp[0] = 0x00; grp[1] = 0x0F; grp[2] = 0xAC; grp[3] = pair;
+        if (wpa2) {
+            p = FindIe(e, 48, 0);               /* AP group cipher */
+            if (p != 0xFFFF && e->ies[p + 1] >= 6)
+                for (i = 0; i < 4; i++) grp[i] = e->ies[p + 4 + i];
+            ie[0] = 1; ie[1] = 0;               /* version 1       */
+            for (i = 0; i < 4; i++) ie[2 + i] = grp[i];
+            ie[6] = 1; ie[7] = 0;
+            ie[8] = 0x00; ie[9] = 0x0F; ie[10] = 0xAC; ie[11] = pair;
+            ie[12] = 1; ie[13] = 0;
+            ie[14] = 0x00; ie[15] = 0x0F; ie[16] = 0xAC; ie[17] = akm;
+            ie[18] = 0; ie[19] = 0;             /* RSN capabilities */
+            AddIe(48, ie, 20);
+        } else {
+            p = FindIe(e, 221, gOuiWpa);
+            grp[0] = 0x00; grp[1] = 0x50; grp[2] = 0xF2; grp[3] = pair;
+            if (p != 0xFFFF && e->ies[p + 1] >= 10)
+                for (i = 0; i < 4; i++) grp[i] = e->ies[p + 8 + i];
+            ie[0] = 0x00; ie[1] = 0x50; ie[2] = 0xF2; ie[3] = 1;
+            ie[4] = 1; ie[5] = 0;
+            for (i = 0; i < 4; i++) ie[6 + i] = grp[i];
+            ie[10] = 1; ie[11] = 0;
+            ie[12] = 0x00; ie[13] = 0x50; ie[14] = 0xF2; ie[15] = pair;
+            ie[16] = 1; ie[17] = 0;
+            ie[18] = 0x00; ie[19] = 0x50; ie[20] = 0xF2; ie[21] = akm;
+            AddIe(221, ie, 22);
+        }
+    }
+    if (HasWmm(e)) {                            /* WMM information */
+        ie[0] = 0x00; ie[1] = 0x50; ie[2] = 0xF2; ie[3] = 0x02;
+        ie[4] = 0x00; ie[5] = 0x01; ie[6] = 0x00;
+        AddIe(221, ie, 7);
+    }
+}
+
+/* BSS_INFO_UPDATE basic (+QBSS) and RLM: connected to e (or not) */
+static USHORT BssInfo(BSSE *e, int connected)
+{
+    USHORT st, i;
+    UCHAR g5 = e->ch > 14;
+
+    PayloadZero(44);
+    PutLe16(4, 0); PutLe16(6, 32);              /* UNI_BSS_INFO_BASIC */
+    gPayload[8] = 1;                            /* active           */
+    PutLe32(12, 0x00010001UL);                  /* CONNECTION_INFRA_STA */
+    gPayload[16] = connected ? 0 : 1;           /* conn_state       */
+    for (i = 0; i < 6; i++) gPayload[18 + i] = connected ? e->bssid[i] : 0;
+    PutLe16(24, 19);                            /* bmc_tx_wlan_idx  */
+    PutLe16(26, e->bint ? e->bint : 100);
+    gPayload[28] = 1;                           /* dtim period      */
+    gPayload[29] = g5 ? 0x01 : 0x06;            /* A : B|G          */
+    PutLe16(30, 19);                            /* sta_idx          */
+    PutLe16(32, g5 ? 0x08 : 0x03);              /* nonht_basic_phy  */
+    PutLe16(36, 15); PutLe16(38, 8);            /* UNI_BSS_INFO_QBSS */
+    gPayload[40] = HasWmm(e);
+    gKind = MK_UNI;
+    st = McuSend(MCU_UNI_CMD_BSS_INFO_UPDATE, 44, 1);
+    if (st >= 0xFFFE || !connected) return st;
+    gAuth.BssUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+
+    PayloadZero(24);                            /* UNI_BSS_INFO_RLM */
+    PutLe16(4, 2); PutLe16(6, 20);
+    gPayload[8]  = e->ch;                       /* control channel  */
+    gPayload[9]  = e->ch;                       /* center_chan      */
+    gPayload[11] = 0;                           /* CMD_CBW_20MHZ    */
+    gPayload[12] = 2;                           /* tx streams       */
+    gPayload[13] = 3;                           /* rx chain mask    */
+    gPayload[14] = 1;                           /* short_st         */
+    gPayload[17] = g5 ? 1 : 0;                  /* nl80211 band     */
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_BSS_INFO_UPDATE, 24, 1);
+}
+
+/* STA_REC for our own BSS entry (wcid 19, sta = NULL in Linux):
+ * only WTBL{GENERIC peer = BSSID, muar 0xE; RX; HDR_TRANS}           */
+static USHORT VifStaRec(BSSE *e)
+{
+    USHORT i, p = 8;
+    PayloadZero(60);
+    gPayload[1] = 19;                           /* wlan_idx_lo      */
+    PutLe16(2, 1);                              /* tlv_num          */
+    gPayload[4] = 1;                            /* is_tlv_append    */
+    gPayload[5] = 0x0E;                         /* muar_idx         */
+    PutLe16(p, 13); PutLe16(p + 2, 52);         /* STA_REC_WTBL     */
+    gPayload[p + 4] = 19;
+    gPayload[p + 5] = 1;                        /* WTBL_RESET_AND_SET */
+    PutLe16(p + 6, 3);
+    p += 12;                                    /* WTBL_GENERIC     */
+    PutLe16(p, 0); PutLe16(p + 2, 20);
+    for (i = 0; i < 6; i++) gPayload[p + 4 + i] = e->bssid[i];
+    gPayload[p + 10] = 0x0E;
+    p += 20;                                    /* WTBL_RX          */
+    PutLe16(p, 1); PutLe16(p + 2, 12);
+    gPayload[p + 5] = 1; gPayload[p + 6] = 1; gPayload[p + 7] = 1;
+    p += 12;                                    /* WTBL_HDR_TRANS   */
+    PutLe16(p, 6); PutLe16(p + 2, 8);
+    gPayload[p + 4] = 1;
+    gPayload[p + 6] = 1;
+    gKind = MK_UNI;
+    return McuSend(MCU_UNI_CMD_STA_REC_UPDATE, 60, 1);
+}
+
+static void RocRelease(void)
+{
+    if (gRocHeld) {
+        RocCmd(0, 0, 0);
+        gRocHeld = 0;
+    }
+}
+
+/* wait up to n x 16 ms until *flag != 0xFFFF */
+static void WaitFor(USHORT *flag, USHORT n)
+{
+    USHORT t;
+    for (t = 0; t < n && *flag == 0xFFFF; t++) {
+        RxDrain();
+        if (*flag != 0xFFFF) break;
+        DH_Sleep(16);
+    }
+    gAuth.Polls += t;
+}
+
+static void Disconnect(void)
+{
+    UCHAR FAR *f;
+    USHORT i;
+    BSSE *e = 0;
+
+    if (!gConnected && !gRocHeld) return;
+    for (i = 0; i < gNBss; i++) {
+        USHORT k;
+        for (k = 0; k < 6 && gBss[i].bssid[k] == gBssid[k]; k++) ;
+        if (k == 6) { e = &gBss[i]; break; }
+    }
+    if (gConnected) {
+        f = MgmtHdr(0xC0, gBssid);              /* deauth, reason 3 */
+        f[24] = 3;
+        TxGo(26, gConnCh, AP_WCID);
+        DH_Sleep(16);
+    }
+    gConnected = 0;
+    RocRelease();
+    if (e) BssInfo(e, 0);
+    gEqCount = 0;
+    for (i = 0; i < 6; i++) gBssid[i] = 0;
+}
+
+/* gAuth.Ssid/SsidLen/Mode in, results in gAuth. Mode 0: one auth
+ * exchange only (v0.19 test). Mode 1: auth + association; on success
+ * the driver stays connected (gConnected) for wpa_supplicant.        */
+static void DoConnect(void)
+{
+    UCHAR FAR *f;
+    BSSE *e;
+    USHORT st, i, n;
+
+    gAuth.Magic = MT7921_AUTH_MAGIC;
+    gAuth.AuthStatus = gAuth.AssocStatus = 0xFFFF;
+    gAuth.StSta = gAuth.StRoc = 0xFFFF;
+    gAuth.StaUni = gAuth.BssUni = gAuth.Sta2Uni = gAuth.VifUni = 0xFFFFFFFFUL;
+    Aut(AUT_STEP_START, AUT_OK);
+
+    Disconnect();
+
+    /* 1. scan when the table has no match yet */
+    e = AuthPick();
+    if (!e) {
+        DoScan();
+        if (!gFwRunning) { Aut(AUT_STEP_SCAN, AUT_ERR_NO_FW); return; }
+        e = AuthPick();
+    }
+    if (!e) { Aut(AUT_STEP_SCAN, AUT_ERR_NO_BSS); return; }
+    for (i = 0; i < 6; i++) gAuth.Bssid[i] = e->bssid[i];
+    gAuth.Channel = e->ch;
+    gAuth.Rssi = e->rssi;
+
+    gAuthRun = 1;
+    RxDrain();
+    SetTiming(e->ch, (e->cap & 0x0400) != 0);
+
+    /* 2. STA record for the AP */
+    st = StaRec(e, 0, 0);
+    gAuth.StSta = st;
+    if (st >= 0xFFFE) { gAuthRun = 0; Aut(AUT_STEP_STA_REC, st == 0xFFFE ? AUT_ERR_TX : AUT_ERR_NO_EVENT); return; }
+    gAuth.StaUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+
+    /* 3. ROC JOIN (held until the keys are set), wait for the grant */
+    gRocToken++;
+    st = RocCmd(1, e->ch, gAuth.Mode ? 3000 : 1500);
+    gAuth.StRoc = st;
+    if (st >= 0xFFFE) { gAuthRun = 0; Aut(AUT_STEP_ROC, AUT_ERR_TX); return; }
+    gRocHeld = 1;
+    for (i = 0; i < 60 && !gAuth.RocGranted; i++) {
+        RxDrain();
+        if (gAuth.RocGranted) break;
+        DH_Sleep(16);
+    }
+    if (!gAuth.RocGranted) {
+        RocRelease();
+        gAuthRun = 0;
+        Aut(AUT_STEP_ROC, AUT_ERR_NO_GRANT);
+        return;
+    }
+
+    /* 4. Open System authentication, up to 3 tries */
+    for (n = 0; n < 3 && gAuth.AuthStatus == 0xFFFF; n++) {
+        f = MgmtHdr(0xB0, e->bssid);
+        f[24] = 0; f[25] = 0; f[26] = 1; f[27] = 0; f[28] = 0; f[29] = 0;
+        if (n) f[1] = 0x08;                     /* retry            */
+        if (TxGo(30, e->ch, AP_WCID)) {
+            RocRelease();
+            gAuthRun = 0;
+            Aut(AUT_STEP_TX, AUT_ERR_TX);
+            return;
+        }
+        gAuth.TxDone = 1;
+        WaitFor(&gAuth.AuthStatus, 20);
+    }
+    gAuth.AuthTries = n;
+    if (gAuth.AuthStatus == 0xFFFF || gAuth.AuthStatus != 0 || !gAuth.Mode) {
+        RocRelease();
+        gAuthRun = 0;
+        if (gAuth.AuthStatus == 0xFFFF) { Aut(AUT_STEP_WAIT, AUT_ERR_NO_RESP); return; }
+        if (gAuth.AuthStatus != 0)      { Aut(AUT_STEP_WAIT, AUT_ERR_STATUS); return; }
+        Aut(AUT_STEP_DONE, AUT_OK);
+        return;
+    }
+
+    /* 5. association request, up to 3 tries */
+    BuildAssocIes(e);
+    gAuth.ReqIeLen = gReqIeLen;
+    gReqCap = 0x0001 | (e->cap & 0x0430);       /* ESS, privacy, short preamble/slot */
+    for (n = 0; n < 3 && gAuth.AssocStatus == 0xFFFF; n++) {
+        f = MgmtHdr(0x00, e->bssid);
+        if (n) f[1] = 0x08;
+        f[24] = (UCHAR)gReqCap; f[25] = (UCHAR)(gReqCap >> 8);
+        f[26] = 10; f[27] = 0;                  /* listen interval  */
+        for (i = 0; i < gReqIeLen; i++) f[28 + i] = gReqIes[i];
+        if (TxGo(28 + gReqIeLen, e->ch, AP_WCID)) {
+            RocRelease();
+            gAuthRun = 0;
+            Aut(AUT_STEP_ASSOC, AUT_ERR_TX);
+            return;
+        }
+        WaitFor(&gAuth.AssocStatus, 30);
+    }
+    gAuth.AssocTries = n;
+    gAuth.RespIeLen = gRespIeLen;
+    if (gAuth.AssocStatus != 0) {
+        RocRelease();
+        gAuthRun = 0;
+        Aut(AUT_STEP_ASSOC, gAuth.AssocStatus == 0xFFFF ? AUT_ERR_NO_ASSOC : AUT_ERR_ASSOC);
+        return;
+    }
+
+    /* 6. Linux sta_event(ASSOC) + bss_info_changed(ASSOC) */
+    for (i = 0; i < 6; i++) gBssid[i] = e->bssid[i];
+    gConnCh = e->ch;
+    gEqCount = 0;
+    gConnected = 1;
+    st = BssInfo(e, 1);
+    if (st < 0xFFFE) {
+        StaRec(e, 2, gAuth.Aid);
+        gAuth.Sta2Uni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+        VifStaRec(e);
+        gAuth.VifUni = gEvtLen >= 44 ? EvtLe32(40) : 0xFFFFFFFEUL;
+    }
+    gAuthRun = 0;
+    gAuth.Connected = (UCHAR)gConnected;
+    Aut(AUT_STEP_CONNECTED, AUT_OK);
+}
+
+/* EAPOL from wpa_supplicant (Ethernet frame) -> 802.11 data, ToDS */
+static ULONG EapolOut(UCHAR FAR *eth, USHORT n)
+{
+    UCHAR FAR *f;
+    USHORT i;
+    if (!gConnected) return NDIS_STATUS_FAILURE;
+    if (n < 14 || n > 1500) return NDIS_STATUS_FAILURE;
+    f = TxBuf();
+    FarZero(f, 32);
+    f[0] = 0x08; f[1] = 0x01;                   /* data, ToDS       */
+    for (i = 0; i < 6; i++) {
+        f[4 + i]  = gBssid[i];                  /* RA = AP          */
+        f[10 + i] = gMac[i];                    /* TA = us          */
+        f[16 + i] = eth[i];                     /* DA               */
+    }
+    f[24] = 0xAA; f[25] = 0xAA; f[26] = 0x03;   /* LLC/SNAP         */
+    f[30] = eth[12]; f[31] = eth[13];
+    for (i = 14; i < n; i++) f[18 + i] = eth[i];
+    if (TxGo(n + 18, gConnCh, AP_WCID)) return NDIS_STATUS_FAILURE;
+    gEapolTx++;
+    return NDIS_STATUS_SUCCESS;
+}
+
+static void FarLe32(UCHAR FAR *p, ULONG v);
+
+/* NDIS_802_11_ASSOCIATION_INFORMATION (40 bytes + request + response IEs) */
+static ULONG PutAssocInfo(UCHAR FAR *d, ULONG len, ULONG *done)
+{
+    USHORT need = 40 + gReqIeLen + gRespIeLen, i;
+    if (!gConnected) return NDIS_STATUS_FAILURE;
+    if (len < need) { *done = need; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+    FarZero(d, 40);
+    FarLe32(d, 40);
+    d[4] = 7;                                   /* cap | listen | AP addr */
+    d[6] = (UCHAR)gReqCap; d[7] = (UCHAR)(gReqCap >> 8);
+    d[8] = 10;
+    for (i = 0; i < 6; i++) d[10 + i] = gBssid[i];
+    FarLe32(d + 16, gReqIeLen);
+    FarLe32(d + 20, 40);
+    d[24] = 7;                                  /* cap | status | AID */
+    d[26] = (UCHAR)gRespCap; d[27] = (UCHAR)(gRespCap >> 8);
+    d[30] = (UCHAR)gAuth.Aid; d[31] = (UCHAR)((gAuth.Aid >> 8) | 0xC0);
+    FarLe32(d + 32, gRespIeLen);
+    FarLe32(d + 36, 40 + gReqIeLen);
+    for (i = 0; i < gReqIeLen; i++) d[40 + i] = gReqIes[i];
+    for (i = 0; i < gRespIeLen; i++) d[40 + gReqIeLen + i] = gRespIes[i];
+    *done = need;
+    return NDIS_STATUS_SUCCESS;
+}
+
+/* ---- OID_802_11_BSSID_LIST: NDIS_802_11_BSSID_LIST_EX --------------- */
+/* NDIS_WLAN_BSSID_EX as driver_genmac.c sees it (116 bytes + IEs):
+ *   0 Length, 4 MacAddress[6], 10 Reserved[2], 12 Ssid{len, [32]},
+ *  48 Privacy, 52 Rssi, 56 NetworkTypeInUse, 60 Configuration{Length,
+ *  BeaconPeriod, ATIMWindow, DSConfig (kHz), FH{4 x ULONG}},
+ *  92 InfrastructureMode, 96 SupportedRates[16], 112 IELength,
+ * 116 IEs = FIXED_IEs{Timestamp[8], BeaconInterval, Capabilities}+IEs */
+static void FarLe32(UCHAR FAR *p, ULONG v)
+{
+    union { ULONG l; UCHAR b[4]; } u;
+    u.l = v;
+    p[0] = u.b[0]; p[1] = u.b[1]; p[2] = u.b[2]; p[3] = u.b[3];
+}
+
+static ULONG ChanKHz(UCHAR ch)
+{
+    ULONG mhz;
+    if (ch == 14)      mhz = 2484;
+    else if (ch < 14)  mhz = 2407 + 5 * (USHORT)ch;
+    else               mhz = 5000 + 5 * (USHORT)ch;
+    /* * 1000 without __U4M: 1024x - 16x - 8x */
+    return (mhz << 10) - (mhz << 4) - (mhz << 3);
+}
+
+static ULONG BuildBssList(UCHAR FAR *d, ULONG len, ULONG *done)
+{
+    USHORT pos = 4, i, k, cnt = 0;
+
+    if (len < 4) { *done = 4; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+    for (i = 0; i < gNBss; i++) {
+        BSSE *e = &gBss[i];
+        USHORT need = (USHORT)((116 + 12 + e->ielen + 3) & ~3);
+        USHORT nr = 0, p;
+        UCHAR FAR *x;
+
+        if ((ULONG)pos + need > len) break;
+        x = d + pos;
+        FarZero(x, need);
+        FarLe32(x + 0, need);
+        for (k = 0; k < 6; k++) x[4 + k] = e->bssid[k];
+        FarLe32(x + 12, e->ssidlen);
+        for (k = 0; k < e->ssidlen; k++) x[16 + k] = (UCHAR)e->ssid[k];
+        FarLe32(x + 48, (e->cap & 0x0010) ? 1 : 0);         /* privacy */
+        FarLe32(x + 52, (ULONG)(long)e->rssi);
+        FarLe32(x + 56, e->ch > 14 ? 2 : 3);    /* Ndis802_11OFDM5 / OFDM24 */
+        FarLe32(x + 60, 32);                    /* Configuration.Length */
+        FarLe32(x + 64, e->bint);
+        FarLe32(x + 72, ChanKHz(e->ch));
+        FarLe32(x + 76, 16);                    /* FHConfig.Length      */
+        FarLe32(x + 92, (e->cap & 0x0002) ? 0 : 1);         /* IBSS : ESS */
+        for (p = 0; p + 2 <= e->ielen; p += 2 + e->ies[p + 1]) {
+            UCHAR id = e->ies[p], l = e->ies[p + 1];
+            if (p + 2 + l > e->ielen) break;
+            if (id == 1 || id == 50)            /* (extended) rates */
+                for (k = 0; k < l && nr < 16; k++)
+                    x[96 + nr++] = e->ies[p + 2 + k];
+        }
+        FarLe32(x + 112, 12 + e->ielen);
+        for (k = 0; k < 8; k++) x[116 + k] = e->tsf[k];
+        x[124] = (UCHAR)e->bint; x[125] = (UCHAR)(e->bint >> 8);
+        x[126] = (UCHAR)e->cap;  x[127] = (UCHAR)(e->cap >> 8);
+        FarCopy(x + 128, (UCHAR FAR *)e->ies, e->ielen);
+        pos += need;
+        cnt++;
+    }
+    FarLe32(d, cnt);
+    *done = pos;
+    return NDIS_STATUS_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /* OID handling                                                        */
 /* ------------------------------------------------------------------ */
@@ -1827,6 +2999,55 @@ static ULONG GetU32(UCHAR FAR *data, ULONG len, ULONG *dst, ULONG *done)
     return NDIS_STATUS_SUCCESS;
 }
 
+/* drain the RX rings when nothing else runs (EAPOL, deauth) */
+static void PollRx(void)
+{
+    if (!gFwRunning || gHwBusy) return;
+    gHwBusy = 1;
+    RxDrain();
+    gHwBusy = 0;
+}
+
+static void StartConnect(char FAR *ssid, UCHAR n, UCHAR mode)
+{
+    USHORT k;
+    FarZero((UCHAR FAR *)&gAuth, sizeof(gAuth));
+    gAuth.SsidLen = n;
+    for (k = 0; k < n; k++) gAuth.Ssid[k] = ssid[k];
+    gAuth.Mode = mode;
+    gHwBusy = 1;
+    if (!gFwRunning) { gFwx = 0; FwBoot(); }
+    DoConnect();
+    gHwBusy = 0;
+}
+
+/* NDIS_802_11_CAPABILITY v2: Length, Version, NoOfPMKIDs, NoOfPairs,
+ * then { AuthMode, EncryptStatus } pairs                             */
+static const UCHAR gCapPairs[] = {
+    0, 1,       /* Open    / Disabled              */
+    7, 6,       /* WPA2PSK / Encryption3 (CCMP)    */
+    4, 6,       /* WPAPSK  / Encryption3           */
+    7, 4,       /* WPA2PSK / Encryption2 (TKIP)    */
+    4, 4        /* WPAPSK  / Encryption2           */
+};
+
+static ULONG PutCapability(UCHAR FAR *data, ULONG len, ULONG *done)
+{
+    USHORT n = sizeof(gCapPairs) / 2, need = 16 + n * 8, i;
+    if (len < need) { *done = need; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+    FarZero(data, need);
+    FarLe32(data, need);
+    FarLe32(data + 4, 2);
+    FarLe32(data + 8, 0);                       /* no PMKID cache yet */
+    FarLe32(data + 12, n);
+    for (i = 0; i < n; i++) {
+        data[16 + i * 8] = gCapPairs[i * 2];
+        data[20 + i * 8] = gCapPairs[i * 2 + 1];
+    }
+    *done = need;
+    return NDIS_STATUS_SUCCESS;
+}
+
 static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
 {
     *done = 0;
@@ -1837,37 +3058,91 @@ static ULONG OidGet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
         return PutU32(data, len, WRND_MIN_VERSION, done);
     case OID_PRIVATE_WRAPPER_LANNUMBER:
         return PutU32(data, len, gLanNumber, done);
-    case OID_PRIVATE_WRAPPER_802_1X_READY:
-        return PutU32(data, len, 0, done);      /* no EAPOL frames queued */
+    case OID_PRIVATE_WRAPPER_802_1X_READY:     /* polled every 100 ms */
+        PollRx();
+        return PutU32(data, len, gEqCount, done);
     case OID_PRIVATE_MT7921_INFO:
         return PutBytes(data, len, (UCHAR FAR *)&gInfo, sizeof(gInfo), done);
+    case OID_PRIVATE_MT7921_SCAN:
+        if (len < sizeof(gScan)) { *done = sizeof(gScan); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1;
+        DoScan();
+        gHwBusy = 0;
+        return PutBytes(data, len, (UCHAR FAR *)&gScan, sizeof(gScan), done);
     case OID_PRIVATE_MT7921_FWBOOT:
         if (len < sizeof(gBoot)) { *done = sizeof(gBoot); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
         gFwx = *(USHORT FAR *)data;             /* flags come in Magic */
+        gHwBusy = 1;
         FwBoot();
+        gHwBusy = 0;
         return PutBytes(data, len, (UCHAR FAR *)&gBoot, sizeof(gBoot), done);
     case OID_PRIVATE_MT7921_HWPROBE:
         if (len < sizeof(gProbe)) { *done = sizeof(gProbe); return NDIS_STATUS_BUFFER_TOO_SHORT; }
         HwProbe();
         return PutBytes(data, len, (UCHAR FAR *)&gProbe, sizeof(gProbe), done);
 
+    case OID_PRIVATE_MT7921_AUTH:
+    case OID_PRIVATE_MT7921_CONNECT:
+        if (len < sizeof(gAuth)) { *done = sizeof(gAuth); return NDIS_STATUS_BUFFER_TOO_SHORT; }
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        {
+            MT7921_AUTH FAR *in = (MT7921_AUTH FAR *)data;
+            UCHAR n = in->SsidLen > 32 ? 32 : in->SsidLen;
+            StartConnect(in->Ssid, n, oid == OID_PRIVATE_MT7921_CONNECT);
+        }
+        return PutBytes(data, len, (UCHAR FAR *)&gAuth, sizeof(gAuth), done);
+    case OID_802_11_BSSID:                      /* polled every second */
+        PollRx();
+        if (!gConnected) return NDIS_STATUS_ADAPTER_NOT_READY;
+        return PutBytes(data, len, (UCHAR FAR *)gBssid, 6, done);
+    case OID_802_11_ASSOCIATION_INFORMATION:
+        return PutAssocInfo(data, len, done);
+    case OID_PRIVATE_WRAPPER_802_1X_RX:
+        PollRx();
+        if (!gEqCount) { *done = 0; return NDIS_STATUS_SUCCESS; }
+        {
+            USHORT n = gEqLen[gEqHead];
+            if (len < n) { *done = n; return NDIS_STATUS_BUFFER_TOO_SHORT; }
+            for (len = 0; len < n; len++) data[(USHORT)len] = gEq[gEqHead][(USHORT)len];
+            gEqHead = (gEqHead + 1) % EQ_N;
+            gEqCount--;
+            *done = n;
+        }
+        return NDIS_STATUS_SUCCESS;
+
     case OID_802_3_CURRENT_ADDRESS:
+        /* v0.19: the real MAC is known only once the firmware runs */
+        if (!gFwRunning && !gHwBusy) {
+            gHwBusy = 1;
+            gFwx = 0;
+            FwBoot();
+            gHwBusy = 0;
+        }
         return PutBytes(data, len, (UCHAR FAR *)gMac, 6, done);
+    case OID_802_11_CAPABILITY:                 /* v0.19 */
+        return PutCapability(data, len, done);
     case OID_802_11_AUTHENTICATION_MODE:
         return PutU32(data, len, gAuthMode, done);
-    case OID_802_11_ENCRYPTION_STATUS:
-        return PutU32(data, len, gEncStatus, done);
+    case OID_802_11_ENCRYPTION_STATUS:         /* no key yet: KeyAbsent */
+        return PutU32(data, len, gEncStatus == 0 ? 2 : gEncStatus == 4 ? 5 :
+                      gEncStatus == 6 ? 7 : gEncStatus, done);
     case OID_802_11_INFRASTRUCTURE_MODE:
         return PutU32(data, len, gInfraMode, done);
     case OID_802_11_SSID:                       /* not associated: empty */
         if (len < 36) { *done = 36; return NDIS_STATUS_BUFFER_TOO_SHORT; }
         FarZero(data, 36);
+        if (gConnected) {
+            USHORT k;
+            data[0] = gAuth.SsidLen;
+            for (k = 0; k < 32; k++) data[4 + k] = gAuth.Ssid[k];
+        }
         *done = 36;
         return NDIS_STATUS_SUCCESS;
-    case OID_802_11_BSSID_LIST:                 /* no scan results yet */
-        return PutU32(data, len, 0, done);
+    case OID_802_11_BSSID_LIST:                 /* v0.17: real results */
+        return BuildBssList(data, len, done);
 
-    case OID_802_11_BSSID:      /* failing = "disconnected" for the poll */
     default:
         return NDIS_STATUS_NOT_SUPPORTED;
     }
@@ -1879,6 +3154,14 @@ static ULONG OidSet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
     switch (oid) {
     case OID_PRIVATE_WRAPPER_802_1X_STATE:
         return GetU32(data, len, &g8021xState, done);
+    case OID_802_11_BSSID_LIST_SCAN:            /* v0.17: scan now (blocks
+                                                   ~1-2 s, sleeping)     */
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1;
+        DoScan();
+        gHwBusy = 0;
+        *done = len;
+        return gScan.Error == SCN_OK ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
     case OID_802_11_AUTHENTICATION_MODE:
         return GetU32(data, len, &gAuthMode, done);
     case OID_802_11_ENCRYPTION_STATUS:
@@ -1886,20 +3169,54 @@ static ULONG OidSet(ULONG oid, UCHAR FAR *data, ULONG len, ULONG *done)
     case OID_802_11_INFRASTRUCTURE_MODE:
         return GetU32(data, len, &gInfraMode, done);
 
-    /* accepted, but nothing happens yet (no radio in phase 1) */
+    case OID_802_11_SSID:                       /* v0.20: connect */
+        if (len < 36) return NDIS_STATUS_INVALID_LENGTH;
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        *done = len;
+        if (data[0] == 0 || data[0] > 32) {     /* empty: disconnect */
+            gHwBusy = 1; Disconnect(); gHwBusy = 0;
+            return NDIS_STATUS_SUCCESS;
+        }
+        {   /* wpa_supplicant disconnects by setting 32 random bytes */
+            USHORT k;
+            for (k = 0; k < data[0]; k++)
+                if (data[4 + k] < 0x20 || data[4 + k] > 0x7E) break;
+            if (k < data[0]) {
+                gHwBusy = 1; Disconnect(); gHwBusy = 0;
+                return NDIS_STATUS_SUCCESS;
+            }
+        }
+        StartConnect((char FAR *)data + 4, data[0], 1);
+        return NDIS_STATUS_SUCCESS;             /* result via BSSID poll */
+    case OID_802_11_BSSID:                      /* preferred AP (FF = any) */
+        if (len >= 6) {
+            USHORT k;
+            for (k = 0; k < 6; k++) gPrefBssid[k] = data[k];
+        }
+        *done = len;
+        return NDIS_STATUS_SUCCESS;
+    case OID_802_11_DISASSOCIATE:
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1; Disconnect(); gHwBusy = 0;
+        *done = len;
+        return NDIS_STATUS_SUCCESS;
+    case OID_PRIVATE_WRAPPER_802_1X_TX:
+        *done = len;
+        return EapolOut(data, (USHORT)len);
+    case OID_802_11_ADD_KEY:                    /* keys: phase 5c */
+        if (gHwBusy) return NDIS_STATUS_RESOURCES;
+        gHwBusy = 1; RocRelease(); gHwBusy = 0;
+        *done = len;
+        return NDIS_STATUS_SUCCESS;
+
+    /* accepted, but nothing happens yet */
     case OID_GEN_CURRENT_PACKET_FILTER:
     case OID_802_3_MULTICAST_LIST:
-    case OID_802_11_BSSID_LIST_SCAN:
-    case OID_802_11_SSID:
-    case OID_802_11_BSSID:
-    case OID_802_11_DISASSOCIATE:
     case OID_802_11_PRIVACY_FILTER:
     case OID_802_11_ADD_WEP:
     case OID_802_11_REMOVE_WEP:
-    case OID_802_11_ADD_KEY:
     case OID_802_11_REMOVE_KEY:
     case OID_802_11_PMKID:
-    case OID_PRIVATE_WRAPPER_802_1X_TX:         /* dropped */
         *done = len;
         return NDIS_STATUS_SUCCESS;
 
@@ -1931,6 +3248,13 @@ static USHORT DoIoctl(RP_IOCTL FAR *rp)
 
     oid = parm[0];
     len = parm[1];
+    /* v0.18: wpa_supplicant's IsWireless() reuses the parameter block
+     * for three requests in a row, so parm[1] then holds the status of
+     * the previous call (0), not a length. Use the larger of parm[1]
+     * and the real IOCtl data length (RX passes DataLen 4 with
+     * parm[1] = 2000, so parm[1] alone is needed there too).         */
+    if ((ULONG)rp->DataLen > len)
+        len = rp->DataLen;
     if (len > WRND_MAX_DATA)
         len = WRND_MAX_DATA;
 

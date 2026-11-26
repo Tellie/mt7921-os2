@@ -1,96 +1,118 @@
-# MT7921.OS2 – MediaTek MT7921 wifi driver for OS/2 (ArcaOS)
+# MT7921 WiFi driver for OS/2 and ArcaOS
 
-Target hardware: MediaTek MT7921 (PCI 14C3:7961), AzureWave module
-(1A3B:4682), as fitted in the HP Victus 15-fa0xxx.
+*Nederlands: [README.nl.md](README.nl.md)*
 
-The driver presents itself as a GenMac-compatible `WRND32$` device, so
-the existing [wpa_supplicant-os2](https://github.com/psmedley/wpa_supplicant-os2)
-can drive it without changes. See `src/wrnd_ioctl.h` for the interface.
+A native driver for the **MediaTek MT7921** (Filogic 330, PCI `14C3:7961`, also sold as AMD RZ608/RZ616) PCIe
+WiFi adapter, written on an HP Victus 15-fa0xxx (subsystem `1A3B:4682`) with ArcaOS 5.1.2.
 
-## Roadmap
+The driver has two parts:
 
-| Phase | Goal | Status |
-|---|---|---|
-| 1 | PCI detection, `WRND32$`, wpa_supplicant probe OIDs | done (v0.01) |
-| 2 | Enable PCI memory, map BAR0, fw/driver-own handshake, read chip ID | done (v0.04) |
-| 3a | ROM patch from disk, bus master, WFDMA rings, MCU messages, ROM patch download | done (v0.10) |
-| 3b | RAM code download, FW_START, N9 ready | done (v0.11) |
-| 3c | Warm reboot: reuse running firmware, NIC capability, real MAC address | **this version (v0.13)** |
-| 3d | IRQ handler instead of polling | |
-| 4 | MCU commands: read MAC from EEPROM, hw_scan → `BSSID_LIST` | |
-| 5 | Mini-MLME: auth/assoc, EAPOL via 802_1X_RX/TX, keys via ADD_KEY | |
-| 6 | NDIS 2.0.1 MAC: PROTMAN binding, 802.3 ⇄ 802.11 data path for TCP/IP | |
+* **The OS/2 side** (`src/os2/`, `src/wlan/`) is taken (apart from names and a few fixes) from Paul Smedley's
+  [iwlwifi driver for OS/2](https://github.com/psmedley/iwlwifi):
+  * a **GenMAC-compatible device** (`\DEV\WRND32$`), so the ArcaOS **Wireless LAN Monitor (XWLAN)** and
+    [wpa_supplicant](https://github.com/psmedley/wpa_supplicant-os2) can drive it;
+  * an **NDIS 2.0.1 MAC** (`MT7921_NIF`), so TCP/IP binds to it as `lanN`;
+  * the station: scan table, authentication, association, WPA2 keys, EAPOL, block-ack reordering.
+* **The chip side** (`src/mt76/`) is the MediaTek back end behind Paul's `wlan/hw.h`, following Linux **mt76**
+  (`mt7921/`, `mt792x_*`, `mt76_connac*`). It grew out of the stand-alone MT7921.OS2 v0.01-v0.20 (kept in `old/`).
 
-## Build
+Paul asked to keep the brands apart, so this is a separate driver that uses his code as its base.
 
-Requires OpenWatcom (1.9 or 2.0) for the driver, gcc for the test tool.
+## Status (v0.51)
 
-```
-%WATCOM%\owsetenv.cmd
-sh build.sh
-```
+Works on the HP Victus, daily use:
 
-Output goes to `out\`: `mt7921.os2`, `mt7921.map`, `wrndtest.exe`.
+* firmware load (cold boot; after a warm reboot the running firmware is reused, and reset and loaded again if it
+  does not answer);
+* scan on 2.4 and 5 GHz; WPA2-PSK (CCMP) with wpa_supplicant or XWLAN; DHCP;
+* 802.11n and 802.11ac: 20/40/80 MHz, two spatial streams, receive and transmit aggregation (block-ack).
 
-## Install (phase 1, safe: no hardware access)
+Measured on 5 GHz, VHT80, two streams (router a few metres away):
 
-Add to CONFIG.SYS (after the existing network drivers):
+| | Speed |
+|---|---|
+| one download (wget), TCP window 246723 | about 8 MB/s (64 Mbit/s) |
+| several connections at once | about 32 MB/s (255 Mbit/s) |
 
-```
-DEVICE=C:\IBMCOM\MACS\MT7921.OS2 /LAN:1
-```
+One TCP connection is limited by the OS/2 stack's maximum window (246723 bytes) divided by the round-trip time,
+not by the WiFi. See "TCP windows" below.
 
-Options: `/LAN:n` – LAN number reported to wpa_supplicant (default 1),
-`/Q` – no boot messages, `/NOMEM` – do not enable PCI memory decoding.
+Not done: WPA3 (needs SAE support in wpa_supplicant as well), TKIP, WEP, power save, 160 MHz.
 
-At boot you should see something like:
+## Install
 
-```
-MT7921.OS2 v0.01 - MediaTek MT7921 wireless (phase 1)
-MT7921.OS2: found at PCI 04:00.0  subsys 1A3B:4682
-MT7921.OS2: BAR0=0000000080600000 IRQ=12 CMD=0000 as lan1
-```
+1. Copy `MT7921.OS2` (`bin\` in the release zip) and `install\MT7921.NIF` to `C:\IBMCOM\MACS`.
+2. Copy the two firmware files from linux-firmware `mediatek/` to `C:\IBMCOM\MACS\MT7921\`:
+   `WIFI_MT7961_patch_mcu_1_2_hdr.bin` and `WIFI_RAM_CODE_MT7961_1.bin`.
+3. `CONFIG.SYS`: `DEVICE=C:\IBMCOM\MACS\MT7921.OS2`. Only one `WRND32$` driver can be loaded: remove GenMAC or
+   any other WiFi driver line.
+4. `PROTOCOL.INI`: bind `MT7921_NIF` as in `install\PROTOCOL.INI.example`. The order of the bindings decides the
+   lan number (with a wired card first, WiFi is `lan1`). `MTMAC.CMD` writes the adapter's MAC address in.
+5. `C:\STARTUP.CMD`: the lines from `install\STARTUP.CMD.example`: the `copy /b` of the firmware (patch first,
+   then the RAM code, as one copy with `+`) and the `inetcfg` lines for bigger TCP windows.
+6. TCP/IP configuration (TCPCFG2): set the WiFi interface (`lan1`) to DHCP. DHCP can be on one interface only.
+7. Reboot. `copy \DEV\WRND32$ con` shows the driver state; `STATE=0064 READY` means the adapter is up.
+8. Connect, either way:
+   * **Wireless LAN Monitor (XWLAN)**, recommended: add the widget to the XCenter (or start `wlanstat.exe` from
+     `\sys\apps\xwps\plugins\xcenter`). Under *Properties - Device* it shows "MediaTek MT7921 PCIe WLAN". Right
+     mouse button - *Add/Edit Profile*: SSID, *WPA2-PSK* with the passphrase, TCP/IP *DHCP*. Then *Select Profile*.
+     XWLAN starts wpa_supplicant and DHCP itself.
+   * **wpa_supplicant by hand**: `install\WIFI.CMD` starts wpa_supplicant (minimised window) and DHCP on `lan1`;
+     call it from the startup.cmd in the Startup folder. To avoid the boot-time DHCP wait, change `-d NN` to `-d 0`
+     in `\MPTN\BIN\SETUP.CMD`. Do not use both ways at the same time.
 
-## Firmware (phase 3a)
+## TCP windows
 
-Get `WIFI_MT7961_patch_mcu_1_2_hdr.bin` and `WIFI_RAM_CODE_MT7961_1.bin` from linux-firmware
-(https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/mediatek)
-and put it in a `MT7921` folder next to the driver:
-
-```
-C:\IBMCOM\MACS\MT7921.OS2
-C:\IBMCOM\MACS\MT7921\WIFI_MT7961_patch_mcu_1_2_hdr.bin
-```
-
-The driver reads it at boot and reports `... loaded (0x...... bytes)`.
-
-## Test
-
-Phase 2 hardware probe (runs only on request, never at boot):
+The OS/2 stack starts with a 32 KB receive window: about 1.5 MB/s to a server 20 ms away, 400 KB/s to one in
+America. The `inetcfg` lines in `STARTUP.CMD.example` raise it to the maximum:
 
 ```
-wrndtest /hw
+inetcfg -s winscale 1
+inetcfg -s sack 1
+inetcfg -s tcprwinsize 246723
+inetcfg -s tcpswinsize 246723
 ```
 
-Expected: `result 0 = OK`, chip ID ending in `7961`.
+`inetcfg -g tcprwinsize` shows the current value and the maximum; a value above the maximum fails.
 
-Phase 3a ROM patch download (the system pauses for a few seconds):
+## Status text and commands
+
+`copy \DEV\WRND32$ con` (or `copy \DEV\WRND32$ c:\status.txt`) prints the driver state. Useful lines: `LINK`
+(channel, VHT80/HT40/HT20, streams), `RXWIDTH`/`TXMODE` (widths and streams actually used), `BA`/`TXBA`
+(aggregation), `RXRING` (best second in KB/s, hex).
+
+Settings that can be changed without a reboot (they take effect at the next connection):
+
+| Command | Effect |
+|---|---|
+| `echo up > \DEV\WRND32$` | start the adapter again after a failure |
+| `echo width 20` / `40` / `80` `> \DEV\WRND32$` | maximum channel width |
+| `echo streams 1` / `2` `> \DEV\WRND32$` | spatial streams |
+| `echo rxba 0` / `1` `> \DEV\WRND32$` | receive aggregation off / on |
+| `echo txba 0` / `1` `> \DEV\WRND32$` | transmit aggregation off / on |
+| `echo fwht 0` / `1` `> \DEV\WRND32$` | 802.11n/ac rates in the firmware off / on |
+
+`PROTOCOL.INI` keywords for the same: `MAXWIDTH`, `STREAMS`, `FWHT`, `AMPDU`, `AGGTX` (see the example file).
+
+## Building
+
+Linux (cross): Open Watcom 2.0 (`binl64` on the PATH, `WATCOM` set) and NASM, then `make -C src`.
+OS/2: `build.cmd` in `src` (Open Watcom 2.0 + NASM). The driver is `src\MT7921.OS2`.
+
+## Layout
 
 ```
-wrndtest /fw
+src/os2/    OS/2 plumbing (Paul Smedley): device header, DevHelp glue, strategy routine, NDIS MAC, GenMAC OIDs,
+            DMA memory, PCI, status text
+src/wlan/   the chip-independent station (Paul Smedley) and hw.h, the contract a chip back end implements
+src/mt76/   the MediaTek MT7921 back end: registers, WFDMA rings, MCU messages, firmware, scan, join, keys, TX/RX,
+            block-ack
+install/    NIF, PROTOCOL.INI and STARTUP.CMD examples, WIFI.CMD, MTMAC.CMD
+old/        the stand-alone MT7921.OS2 v0.01-v0.20 and its test tool wrndtest
 ```
 
-After a warm reboot the WiFi firmware is still running in the chip; since
-v0.13 `/fw` then reuses it and only sets up the host DMA again. Expected: `OK at step 14 (done)`, sem get 2, patch finish 0, sem release 3
-(sem get 1 = the patch was already loaded). The WFSYS reset is off by
-default since v0.10 (`/x:8` turns it on; with it the WFDMA never starts).
+## Licence
 
-
-```
-wrndtest
-wpa_supplicant -i lan1 -c wpa.conf -dd
-```
-
-`wrndtest` must report ISWIRELESS=1, version 0x00010008 and the PCI data.
-wpa_supplicant should find `lan1`, initialise and start scanning
-(with 0 results – there is no radio yet).
+GPL-2.0-only (`COPYING`), because of the OS/2 side from the iwlwifi driver. The mt76 code the back end follows is
+ISC licensed and compatible with that. The firmware is MediaTek's, distributed separately under its own licence.
+See `PROVENANCE.md`.

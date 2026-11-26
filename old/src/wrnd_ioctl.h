@@ -137,6 +137,9 @@ typedef struct _WRND_PARM {
 #define NDIS_STATUS_NOT_SUPPORTED      0xC00000BBUL
 #define NDIS_STATUS_INVALID_LENGTH     0xC0010014UL
 #define NDIS_STATUS_BUFFER_TOO_SHORT   0xC0010016UL
+#define NDIS_STATUS_RESOURCES          0xC000009AUL
+#define NDIS_STATUS_FAILURE            0xC0000001UL
+#define NDIS_STATUS_ADAPTER_NOT_READY  0xC0010011UL
 
 #define WRND_MAX_DATA                  10000UL  /* caller caps Parm[1] */
 
@@ -255,7 +258,7 @@ typedef struct _MT7921_FWBOOT {     /* 328 bytes */
     unsigned long  ChipId;
     unsigned long  PciCmd;          /* config dword 0x04 after BM on  */
     unsigned long  GloCfg;          /* WFDMA0_GLO_CFG after enable    */
-    unsigned long  Polls;           /* polls of the step that ended   */
+    unsigned long  Polls;           /* v0.17: 16 ms sleeps            */           /* polls of the step that ended   */
     unsigned short SemGet;          /* status byte, 0xFFFF = none     */
     unsigned short SemRel;
     unsigned short Finish;
@@ -334,6 +337,150 @@ typedef struct _MT7921_FWBOOT {     /* 328 bytes */
 #define FWX_BUS_RESET           0x0040  /* v0.13: do the PCIe bus reset
                                            (off by default: the firmware
                                            survives it anyway)         */
+
+/* ---- Phase 4a: first scan (OID_PRIVATE_MT7921_SCAN) ------------- */
+#define OID_PRIVATE_MT7921_SCAN        0xFFFFFF83UL
+#define MT7921_SCAN_MAGIC              0x4E414353UL     /* "SCAN" */
+
+#define SCN_STEP_START      0
+#define SCN_STEP_EFUSE      1       /* EXT EFUSE_BUFFER_MODE          */
+#define SCN_STEP_MAC_EN     2       /* EXT MAC_INIT_CTRL              */
+#define SCN_STEP_CHAN_DOM   3       /* CE SET_CHAN_DOMAIN (v0.15)     */
+#define SCN_STEP_RX_PATH    4       /* EXT SET_RX_PATH    (v0.15)     */
+#define SCN_STEP_DEV_INFO   5       /* UNI DEV_INFO_UPDATE            */
+#define SCN_STEP_BSS_INFO   6       /* UNI BSS_INFO_UPDATE            */
+#define SCN_STEP_HW_SCAN    7       /* CE START_HW_SCAN               */
+#define SCN_STEP_COLLECT    8       /* beacons until SCAN_DONE        */
+#define SCN_STEP_DONE       9
+
+#define SCN_OK              0
+#define SCN_ERR_NO_FW       1       /* run /fw first                  */
+#define SCN_ERR_TX          2       /* command not taken by DMA       */
+#define SCN_ERR_NO_EVENT    3       /* no answer from the firmware    */
+#define SCN_ERR_STATUS      4       /* firmware returned an error     */
+#define SCN_ERR_NO_DONE     5       /* no SCAN_DONE event (timeout)   */
+
+#define SCAN_MAX_BSS        16
+
+#pragma pack(1)
+typedef struct _MT7921_BSS {        /* 40 bytes */
+    unsigned char  Bssid[6];
+    unsigned char  Channel;         /* from the DS parameter IE        */
+    unsigned char  SsidLen;
+    char           Ssid[32];
+} MT7921_BSS;
+
+typedef struct _MT7921_SCAN {       /* 824 bytes */
+    unsigned long  Magic;
+    unsigned short Step;
+    unsigned short Error;
+    unsigned short StEfuse;         /* status byte, FFFF none, FFFE TX */
+    unsigned short StMacEn;
+    unsigned long  DevUni;          /* UNI event status (0 = OK)      */
+    unsigned long  BssUni;
+    unsigned short StScan;          /* 0 = taken by DMA (no answer)   */
+    unsigned short ScanDone;        /* 1 = SCAN_DONE event seen       */
+    unsigned long  Frames;          /* v0.17: other MCU events        */
+    unsigned long  Beacons;         /* beacons / probe responses      */
+    unsigned long  Events;          /* v0.17: frames on the MCU rings */
+    unsigned long  Polls;
+    unsigned short NBss;            /* networks found (up to 32)      */
+    unsigned short FirstLen;        /* length of the first RX2 frame  */
+    unsigned char  FirstFrame[64];  /* its first 64 bytes (RXD layout) */
+    MT7921_BSS     Bss[SCAN_MAX_BSS];
+    /* v0.15 */
+    unsigned short StChanDom;       /* 0 = taken by DMA (no answer)   */
+    unsigned short StRxPath;        /* status byte, FFFF none         */
+    unsigned char  DoneEvt[48];     /* SCAN_DONE payload (after RXD):
+                                       [0] seq, [4] complete_channel_num,
+                                       [5] current_state, [8..11]
+                                       beacon_scan_num, [20..22] alpha2 */
+    unsigned char  EvtIds[8];       /* eid of the first other events  */
+    /* v0.17 */
+    signed char    Rssi[SCAN_MAX_BSS];  /* dBm per Bss[] entry          */
+} MT7921_SCAN;
+#pragma pack()
+
+/* ---- Phase 5a: authentication test (OID_PRIVATE_MT7921_AUTH) ----- */
+/* GET with a MT7921_AUTH buffer; the caller puts the SSID in Ssid /
+ * SsidLen. The driver scans if needed, takes the strongest BSS with
+ * that SSID, adds a STA record for it, asks the firmware for the
+ * channel (ROC JOIN), sends one Open System authentication frame and
+ * waits up to 1 s for the answer. No association yet.               */
+#define OID_PRIVATE_MT7921_AUTH        0xFFFFFF84UL
+#define MT7921_AUTH_MAGIC              0x48545541UL     /* "AUTH" */
+
+#define AUT_STEP_START      0
+#define AUT_STEP_SCAN       1       /* scan / pick BSS                */
+#define AUT_STEP_STA_REC    2       /* UNI STA_REC_UPDATE (AP, wcid 1) */
+#define AUT_STEP_ROC        3       /* UNI ROC acquire + grant event  */
+#define AUT_STEP_TX         4       /* auth frame on TX ring 0        */
+#define AUT_STEP_WAIT       5       /* auth response                  */
+#define AUT_STEP_DONE       6
+
+#define AUT_OK              0
+#define AUT_ERR_NO_FW       1
+#define AUT_ERR_NO_BSS      2       /* SSID not in the scan results   */
+#define AUT_ERR_TX          3       /* command/frame not taken by DMA */
+#define AUT_ERR_NO_EVENT    4       /* no answer                      */
+#define AUT_ERR_STATUS      5       /* firmware/AP returned an error  */
+#define AUT_ERR_NO_GRANT    6       /* no ROC grant event             */
+#define AUT_ERR_NO_RESP     7       /* no authentication response     */
+#define AUT_ERR_NO_ASSOC    8       /* no association response        */
+#define AUT_ERR_ASSOC       9       /* association refused (status)   */
+
+#define AUT_STEP_ASSOC      7       /* v0.20: association request     */
+#define AUT_STEP_BSS        8       /* BSS_INFO + STA_REC (ASSOC)     */
+#define AUT_STEP_CONNECTED  9
+
+/* v0.20: full connect test, same MT7921_AUTH buffer (Mode = 1).
+ * wpa_supplicant uses the same code via OID_802_11_SSID.            */
+#define OID_PRIVATE_MT7921_CONNECT     0xFFFFFF85UL
+
+#pragma pack(1)
+typedef struct _MT7921_AUTH {       /* 160 bytes */
+    unsigned long  Magic;
+    unsigned short Step;
+    unsigned short Error;
+    unsigned char  SsidLen;         /* in */
+    char           Ssid[32];        /* in */
+    unsigned char  Bssid[6];        /* chosen BSS                     */
+    unsigned char  Channel;
+    signed char    Rssi;
+    unsigned long  StaUni;          /* STA_REC_UPDATE status (0 = OK) */
+    unsigned short StSta;           /* status byte, FFFF none, FFFE TX */
+    unsigned short StRoc;           /* 0 = taken by DMA               */
+    unsigned char  RocGranted;      /* 1 = ROC grant event seen       */
+    unsigned char  RocStatus;       /* grant: status                  */
+    unsigned char  RocChannel;      /* grant: primary channel         */
+    unsigned char  RocBand;         /* grant: 1 = 2.4 GHz, 2 = 5 GHz  */
+    unsigned short TxDone;          /* 1 = frame taken by DMA         */
+    unsigned short AuthSeq;         /* response: transaction seq      */
+    unsigned short AuthStatus;      /* response: status, FFFF = none  */
+    unsigned short AuthAlg;
+    unsigned short RxFrames;        /* frames to our MAC              */
+    unsigned short RxOther;         /* other RX buffers drained       */
+    unsigned char  Fc[8];           /* first byte of the first frames
+                                       to us (B0 auth, C0 deauth ..)  */
+    unsigned char  EvtIds[8];       /* eid of MCU events while waiting */
+    unsigned long  Polls;
+    /* v0.20 */
+    unsigned char  FcFlags[8];      /* second fc byte (08 = retry)    */
+    unsigned short Seq[8];          /* sequence control of those frames */
+    unsigned short AssocStatus;     /* assoc response status, FFFF none */
+    unsigned short Aid;
+    unsigned long  BssUni;          /* BSS_INFO (connected) status    */
+    unsigned long  Sta2Uni;         /* STA_REC (AP, ASSOC) status     */
+    unsigned long  VifUni;          /* STA_REC (own BSS, wcid 19)     */
+    unsigned char  Connected;
+    unsigned char  Mode;            /* in: 0 = auth only, 1 = connect */
+    unsigned short ReqIeLen;        /* IEs we sent in the assoc request */
+    unsigned short RespIeLen;
+    unsigned short AuthTries;
+    unsigned short AssocTries;
+    unsigned char  Rsv[17];
+} MT7921_AUTH;
+#pragma pack()
 
 /* order of MT7921_FWBOOT.Dump[] */
 #define DUMP_LPCTL          0   /* 0x7C060010 CONN_ON_LPCTL          */

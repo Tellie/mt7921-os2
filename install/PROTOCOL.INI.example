@@ -1,0 +1,38 @@
+[PROT_MAN]
+
+   DRIVERNAME = PROTMAN$
+
+[IBMLXCFG]
+
+   TCPIP_NIF = TCPIP.NIF
+   MT7921_NIF = MT7921.NIF
+
+[TCPIP_NIF]
+
+   DriverName = TCPIP$
+   Bindings = MT7921_NIF
+
+[MT7921_NIF]
+
+   DriverName = WRND32$
+
+   ; Your adapter's MAC (HWMAC= in the status text; MTMAC.CMD writes it here). Recommended: TCP/IP copies the
+   ; address at bind time, which can be before the firmware has run and the driver knows the real one.
+   NETADDRESS = "000000000000"
+
+   ; Optional: join only an access point on this primary channel (testing).
+   ; CHANNEL = 6
+
+   ; Options of the shared station code (all optional; the defaults are the fastest):
+   ; MAXWIDTH = 20 | 40 | 80   widest channel (default 80)
+   ; STREAMS = 1 | 2           spatial streams (default 2)
+   ; AMPDU = 0                 no receive aggregation
+   ; AGGTX = 0                 no QoS data, no transmit aggregation
+   ; (RATEADAPT and POWERSAVE are read but not used by the MT7921 back end.)
+
+   ; FWHT = 0 keeps the firmware from knowing that the access point is an HT (802.11n) station (legacy rates
+   ; only). Default 1 since v0.45. 'echo fwht 0 > \DEV\WRND32$' does the same without a reboot (next join).
+   ; FWHT = 0
+
+   ; Receive aggregation (block-ack sessions) is on by default since v0.45; 'echo rxba 0 > \DEV\WRND32$'
+   ; turns it off for the next sessions.

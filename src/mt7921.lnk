@@ -1,12 +1,26 @@
-# wlink directives for MT7921.OS2 (16-bit NE physical device driver)
+# SPDX-License-Identifier: GPL-2.0-only
+# wlink directives for MT7921.OS2 (the container of the QCA6174 and RTL88EU drivers: 16-bit NE "dll" with an
+# IOPL code segment, no default libraries). hdr.obj must be first, end.obj last.
 format os2 dll
-name mt7921.os2
-option quiet, map=mt7921.map, nodefaultlibs
-option description 'MT7921.OS2 MediaTek MT7921 wireless driver (phase 1)'
-file header.obj
-file mt7921.obj
-library os2.lib
-# Data first (device header at DS:0), then code.
-order clname DATA segment _HEADER segment CONST segment CONST2 segment _DATA
-      clname BSS  segment _BSS segment ENDDATA
-      clname CODE segment _TEXT segment ENDCODE
+name MT7921.OS2
+option quiet,map=MT7921.map,verbose,caseexact,eliminate,nodefaultlibs
+option description '@#TeLLie:0.51#@##1## 26 Nov 2026 21:40:00     ARCAOS-DEV::en:US:2:::@@MediaTek MT7921 PCIe WiFi driver for OS/2 and ArcaOS (GenMAC + NDIS, mt76 back end)'
+segment class 'CODE' iopl
+import DOSOPEN DOSCALLS.70
+import DOSCLOSE DOSCALLS.59
+import DOSREAD DOSCALLS.137
+import DOSDEVIOCTL DOSCALLS.53
+file obj/hdr.obj
+file obj/lib.obj
+file obj/ndisx.obj
+file obj/strat.obj
+file obj/pci.obj
+file obj/mem.obj
+file obj/mt_dma.obj
+file obj/mt_fw.obj
+file obj/mt_mac.obj
+file obj/sta.obj
+file obj/ndis.obj
+file obj/genmac.obj
+file obj/dbg.obj
+file obj/end.obj

@@ -53,6 +53,7 @@ MmioResult      dd      0               ; result of the last MmioRd / PciCfgRd
 PhysResult      dd      0               ; result of the last DH_AllocPhys
         public  VirtResult
 VirtResult      dd      0               ; far pointer from DH_PhysToVirt
+BlockId         dw      0               ; event id for DH_Sleep
 _DATA   ends
 
 ENDDATA segment
@@ -181,6 +182,20 @@ pv_fail:
         mov     ax, 1
         ret
 DH_PhysToVirt endp
+
+; void DH_Sleep(USHORT ms) - DevHlp_ProcBlock with a timeout; lets
+;   the rest of the system run while we wait (task time only)
+;   #pragma aux: parm [cx] modify [ax bx cx dx di si es]
+        public  DH_Sleep
+DH_Sleep proc near
+        mov     ax, ds                  ; event id = DS:BlockId (unique)
+        mov     bx, offset DGROUP:BlockId
+        xor     di, di                  ; timeout high word
+        mov     dh, 1                   ; not interruptible
+        mov     dl, 04h                 ; DevHlp_ProcBlock
+        call    dword ptr ds:Device_Help
+        ret
+DH_Sleep endp
 
 ; void PciCfgRd(USHORT addrHi, USHORT addrLo) - config mechanism #1
 ;   #pragma aux: parm [ax] [bx]      result -> MmioResult

@@ -1,0 +1,10 @@
+[MT7921]
+Type = NDIS
+Title = "MediaTek MT7921 PCIe WLAN (OS/2 native)"
+Version = 0.51
+DriverName = WRND32$
+Xports = NETBEUI, LANDD
+
+[File]
+Name = MT7921.OS2
+Path = IBMCOM\MACS
