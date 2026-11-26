@@ -22,7 +22,7 @@ UCHAR  g_hw_mac[6];
 UCHAR  g_hw_nss = 2;
 ULONG  g_patch_len, g_ram_len;
 char   g_fwver[12], g_fwdate[16];
-USHORT g_reattached;
+USHORT g_reattached, g_force_cold, g_resets;
 
 static char  *g_devname = "MediaTek MT7921 (Filogic 330) PCIe WLAN";
 static USHORT g_matched;
@@ -358,9 +358,25 @@ static int init_cmds(void)
 }
 
 /* ---- bring-up -------------------------------------------------------------------------------------------------- */
+/* mt792x_wfsys_reset: WFSYS_SW_RST_B (bit 0) low for 50 ms, then wait for WFSYS_SW_INIT_DONE (bit 4) */
+static int wfsys_reset(void)
+{
+   USHORT i;
+
+   mt_l1wr(0x18000140UL, mt_l1rd(0x18000140UL) & ~1UL);
+   dd_msleep(50);
+   mt_l1wr(0x18000140UL, mt_l1rd(0x18000140UL) | 1UL);
+   for (i = 0; i < 50; i++) {
+      if (mt_l1rd(0x18000140UL) & 0x10UL)
+         return 0;
+      dd_msleep(10);
+   }
+   return -1;
+}
+
 int hw_up(void)
 {
-   USHORT cmd;
+   USHORT cmd, attempt;
    ULONG chip;
 
    g_hw_failed = 0;
@@ -386,36 +402,60 @@ int hw_up(void)
    if (hook_init() || irq_hook())
       tstr("[mt: no interrupt: polled]");
    step(7);
-   if (own_handshake())
-      return fail("MT7921: the chip did not hand over (CONN_ON_LPCTL)", mt_rd(REG_CONN_ON_LPCTL));
-   chip = mt_l1rd(HW_CHIPID);
-   if (LO16(chip) != 0x7961)
-      return fail("MT7921: unexpected chip id", chip);
+   /* Attempt 0 reuses a firmware that is still running (warm reboot). If that firmware does not answer, or the
+    * last bring-up failed, or the firmware died while running (g_force_cold), attempt 1 resets the WiFi
+    * subsystem (mt792x_wfsys_reset) and loads patch and RAM code again, as Linux mt7921e_mac_reset. */
+   for (attempt = (USHORT)(g_force_cold ? 1 : 0); attempt < 2; attempt++) {
+      g_hw_failed = 0;
+      g_mcu_fail = 0;
+      if (attempt) {
+         tstr("[mt: WiFi subsystem reset, firmware loaded again]"); tnl();
+         g_resets++;
+         if (wfsys_reset())
+            tstr("[mt: WFSYS reset: no INIT_DONE]");
+      }
+      if (own_handshake()) {
+         fail("MT7921: the chip did not hand over (CONN_ON_LPCTL)", mt_rd(REG_CONN_ON_LPCTL));
+         continue;
+      }
+      chip = mt_l1rd(HW_CHIPID);
+      if (LO16(chip) != 0x7961)
+         return fail("MT7921: unexpected chip id", chip);
 
-   g_reattached = (USHORT)((mt_rd(REG_CONN_ON_MISC) & 3UL) == 3UL);
-   mt_wr(REG_HOST_INT_ENA, 0);
-   mt_wr(REG_PCIE_MAC_INT_ENABLE, 0x000000FFUL);
-   mt_dma_disable();                                /* stale rings of a previous session stop first        */
-   mt_rings_init();
-   pci_enable();                                    /* bus master, INTx, ASPM off                          */
-   mt_dma_enable();
-   if (!g_reattached)
-      mt_wr(REG_SWDEF_MODE, 0);                     /* normal mode                                         */
-   if (mcu_own())
-      return fail("MT7921: driver own (LPCR_HOST) timed out", mt_l1rd(L1_TOP_LPCR_HOST_BAND0));
-
-   if (!g_reattached) {
-      step(8);
-      if (load_patch())
-         return -1;
-      step(9);
-      if (load_ram())
-         return -1;
-   } else
-      tstr("[mt: firmware still running: reattached]");
-   step(0x0A);
-   if (nic_cap())
-      return fail("MT7921: no MAC address from the firmware (NIC capability)", 0UL);
+      g_reattached = (USHORT)(!attempt && (mt_rd(REG_CONN_ON_MISC) & 3UL) == 3UL);
+      mt_wr(REG_HOST_INT_ENA, 0);
+      mt_wr(REG_PCIE_MAC_INT_ENABLE, 0x000000FFUL);
+      mt_dma_disable();                             /* stale rings of a previous session stop first        */
+      mt_rings_init();
+      pci_enable();                                 /* bus master, INTx, ASPM off                          */
+      mt_dma_enable();
+      if (!g_reattached)
+         mt_wr(REG_SWDEF_MODE, 0);                  /* normal mode                                         */
+      if (mcu_own()) {
+         fail("MT7921: driver own (LPCR_HOST) timed out", mt_l1rd(L1_TOP_LPCR_HOST_BAND0));
+         continue;
+      }
+      if (!g_reattached) {
+         step(8);
+         if (load_patch())
+            continue;
+         step(9);
+         if (load_ram())
+            continue;
+      } else
+         tstr("[mt: firmware still running: reattached]");
+      step(0x0A);
+      if (nic_cap()) {
+         fail("MT7921: no MAC address from the firmware (NIC capability)", 0UL);
+         continue;
+      }
+      break;
+   }
+   g_force_cold = 0;
+   if (attempt >= 2) {
+      g_force_cold = 1;                             /* 'echo up' tries the reset again                     */
+      return -1;
+   }
    if (!g_cfgmac) {
       fmemcpy((UCHAR FAR *)g_mymac, (UCHAR FAR *)g_hw_mac, 6);
       ndis_set_mac(g_mymac);
@@ -428,6 +468,14 @@ int hw_up(void)
    g_hw_ready = 1;
    tstr("[mt: ready]"); tnl();
    return 0;
+}
+
+int hw_dead(void)
+{
+   if (g_mcu_fail < MCU_DEAD)
+      return 0;
+   g_force_cold = 1;
+   return 1;
 }
 
 void hw_down(void)
@@ -454,7 +502,10 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
    fmemcpy((UCHAR FAR *)date, (UCHAR FAR *)g_fwdate, 14);
    ps("CHIP=MT7921 STATE="); ph(g_hw_state, 4);
    ps(g_hw_ready ? " READY" : (g_hw_failed ? " FAILED" : " not started"));
-   ps(g_reattached ? " (firmware reused after warm reboot)" : ""); nl();
+   ps(g_reattached ? " (firmware reused after warm reboot)" : "");
+   ps(" RESETS="); ph(g_resets, 2); ps(" MCUFAIL="); ph(g_mcu_fail, 2); nl();
+   ps("RXBA (block-ack firmware commands) on="); ph(g_rxba, 1); ps(" sent="); ph(g_ba_cmds, 4);
+   ps(" ring-busy="); ph(g_ba_busy, 4); ps(" queue-full="); ph(g_ba_lost, 4); nl();
    ps("PATCH="); ph(g_patch_len, 8); ps(" RAM="); ph(g_ram_len, 8);
    if (ver[0]) { ps(" FWVER="); ps(ver); ps(" "); ps(date); }
    nl();

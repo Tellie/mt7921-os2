@@ -15,7 +15,9 @@ RING g_rwm   = { REG_TX_RING_BASE + 0x110, 16 };
 RING g_rrx0  = { REG_RX_RING_BASE + 0x000, 8 };
 RING g_rrx2  = { REG_RX_RING_BASE + 0x020, 32 };
 RING g_rrx4  = { REG_RX_RING_BASE + 0x040, 32 };
-DMA  g_cmdbuf, g_bounce, g_txslot[TX0_N];
+DMA  g_cmdbuf, g_cmdbuf2, g_bounce, g_txslot[TX0_N];
+USHORT g_mcu_fail;                                  /* MCU commands without an answer in a row (firmware dead) */
+static USHORT g_mcu_lk;                             /* the MCU command ring: one sender at a time          */
 
 USHORT g_mt_on;
 USHORT g_scan_done, g_roc_granted, g_evt_done;
@@ -93,7 +95,7 @@ int mt_dma_alloc(void)
    if (ring_alloc(&g_rtx0, 0) || ring_alloc(&g_rfwdl, 0) || ring_alloc(&g_rwm, 0) ||
        ring_alloc(&g_rrx0, 1) || ring_alloc(&g_rrx2, 1) || ring_alloc(&g_rrx4, 1))
       return -1;
-   if (dma_get(1280, &g_cmdbuf) || dma_get(4096, &g_bounce))
+   if (dma_get(1280, &g_cmdbuf) || dma_get(256, &g_cmdbuf2) || dma_get(4096, &g_bounce))
       return -1;
    for (i = 0; i < TX0_N; i++)
       if (dma_get(TX_SLOT, &g_txslot[i]))
@@ -222,10 +224,16 @@ USHORT evt16(USHORT at)             { return get16((UCHAR FAR *)g_evt + at); }
 USHORT mt_mcu(UCHAR cid, USHORT plen, int wait)
 {
    USHORT hdr = (USHORT)((g_kind == MK_UNI) ? 48 : 64);
-   USHORT total = (USHORT)(hdr + plen);
+   USHORT total = (USHORT)(hdr + plen), nested;
    UCHAR FAR *b = DPTR(g_cmdbuf);
    UCHAR seq;
 
+   if (wait && g_mcu_fail >= MCU_DEAD) {            /* the firmware does not answer any more: do not wait   */
+      g_kind = MK_LEGACY;
+      g_setq = MCU_Q_NA;
+      return ST_NOEVT;
+   }
+   nested = rt_lock_acquire(&g_mcu_lk, (USHORT)(rt_cpu_id() + 1));
    seq = (UCHAR)(++g_seq & 0x0F);
    if (!seq)
       seq = (UCHAR)(++g_seq & 0x0F);
@@ -262,15 +270,52 @@ USHORT mt_mcu(UCHAR cid, USHORT plen, int wait)
    g_wait_seq = (UCHAR)(wait ? seq : 0);
    if (mt_txsend(&g_rwm, g_cmdbuf.phys, total)) {
       g_wait_seq = 0;
+      if (!nested)
+         rt_lock_release(&g_mcu_lk);
       return ST_NOTX;
    }
+   if (!nested)
+      rt_lock_release(&g_mcu_lk);
    if (!wait)
       return 0;
    if (hw_wait(&g_evt_done, 3000) || !g_evt_done) {
       g_wait_seq = 0;
+      g_mcu_fail++;
       return ST_NOEVT;
    }
+   g_mcu_fail = 0;
    return g_evt[32];
+}
+
+/* A UNI command from the receive path (block-ack sessions): its own buffer, no answer awaited, never blocks.
+ * 0 = sent, -1 = the command ring is in use right now (try again later). */
+int mt_mcu_async_uni(UCHAR cid, UCHAR FAR *pl, USHORT plen)
+{
+   UCHAR FAR *b = DPTR(g_cmdbuf2);
+   USHORT total = (USHORT)(48 + plen);
+   UCHAR seq;
+   int rc;
+
+   if (total > 256 || !g_mt_on)
+      return 0;                                     /* nothing sensible to do: drop it                     */
+   if (rt_lock_try(&g_mcu_lk, (USHORT)(rt_cpu_id() + 1)))
+      return -1;
+   seq = (UCHAR)(++g_seq & 0x0F);
+   if (!seq)
+      seq = (UCHAR)(++g_seq & 0x0F);
+   fmemset(b, 0, 48);
+   put32(b + 0, 0x41000000UL | total);
+   put32(b + 4, 0x80010000UL);
+   put16(b + 32, (USHORT)(total - 32));
+   put16(b + 34, cid);
+   b[37] = 0xA0;
+   b[39] = seq;
+   b[43] = 0x07;
+   fmemcpy(b + 48, pl, plen);
+   rc = mt_txsend(&g_rwm, g_cmdbuf2.phys, total);
+   rt_lock_release(&g_mcu_lk);
+   (void)rc;
+   return 0;
 }
 
 /* ---- receive ------------------------------------------------------------------------------------------------- */
@@ -340,6 +385,7 @@ static void service_once(void)
    rx_ring(&g_rrx4);
    rx_ring(&g_rrx2);
    sta_rx_tick();
+   mt_ba_flush();
 }
 
 void hw_service(void)

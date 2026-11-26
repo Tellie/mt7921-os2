@@ -25,6 +25,8 @@ UCHAR  hw_vendor_oui(USHORT i);                 /* OID_GEN_VENDOR_ID bytes 0..2 
 
 /* ---- state ---------------------------------------------------------------------------------------- */
 extern USHORT g_hw_ready;                       /* firmware running, station usable                          */
+extern UCHAR  g_rxba;                            /* MT7921: receive block-ack sessions on                      */
+int    hw_dead(void);                             /* the firmware has stopped answering (hw_up resets it)       */
 extern USHORT g_hw_failed;                      /* bring-up failed; "up" on the device retries               */
 extern USHORT g_hw_state;                       /* bring-up step reached (status text)                       */
 extern UCHAR  g_hw_mac[6];                      /* the adapter's own address (NVM / OTP)                     */

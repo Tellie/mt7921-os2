@@ -21,6 +21,7 @@ USHORT g_rxs[2][6];                                 /* RX security counters, see
 ULONG  g_rxs_d1[4];
 UCHAR  g_rxs_fc[4], g_rxs_a[4][18];
 USHORT g_rxs_n;
+UCHAR  g_rxba = 1;                                   /* receive block-ack sessions ('echo rxba 0|1')        */
 UCHAR  g_act[4][6];                                  /* the last 4 action frames from our AP: first 6 body bytes */
 USHORT g_act_n;
 USHORT g_rxm[2][5];                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
@@ -700,8 +701,102 @@ int hw_key_clear(USHORT pairwise, UCHAR idx)
 }
 
 /* ---- aggregation: not yet (the station refuses ADDBA when hw_ba_start fails) --------------------------------------- */
-int    hw_ba_start(UCHAR tid, USHORT ssn, USHORT win) { (void)tid; (void)ssn; (void)win; return -1; }
-int    hw_ba_stop(UCHAR tid)                          { (void)tid; return 0; }
+/* Receive block-ack sessions (mt7921_mcu_uni_rx_ba -> mt76_connac_mcu_sta_ba, recipient): first a STA_REC_UPDATE
+ * with WTBL{WTBL_BA}, then one with STA_REC_BA. The station's ADDBA handler runs on the receive path, so the
+ * commands are queued and sent from the service routine (mt_ba_flush) on their own buffer, without waiting.
+ * The frames are put back in order by the station (wlan/sta.c ba_input), as mt76 does in software. */
+#define BAQ_N 8
+static struct { UCHAR tid, en, step; USHORT ssn, win; } g_baq[BAQ_N];
+static USHORT g_baq_h, g_baq_t;
+static UCHAR  g_bapl[64];
+USHORT g_ba_cmds, g_ba_busy, g_ba_lost;
+
+static int ba_queue(UCHAR tid, UCHAR en, USHORT ssn, USHORT win)
+{
+   USHORT fl = rt_irq_save(), n = (USHORT)((g_baq_h + 1) % BAQ_N);
+   int rc = -1;
+
+   if (n != g_baq_t) {
+      g_baq[g_baq_h].tid = tid;
+      g_baq[g_baq_h].en = en;
+      g_baq[g_baq_h].step = 0;
+      g_baq[g_baq_h].ssn = ssn;
+      g_baq[g_baq_h].win = win;
+      g_baq_h = n;
+      rc = 0;
+   } else
+      g_ba_lost++;
+   rt_irq_restore(fl);
+   return rc;
+}
+
+void mt_ba_flush(void)
+{
+   while (g_baq_t != g_baq_h) {
+      USHORT k = g_baq_t, len;
+      UCHAR tid = g_baq[k].tid, en = g_baq[k].en;
+
+      if (!g_hw_ready || !g_mnet) {                 /* left the AP meanwhile: nothing to set up            */
+         g_baq_t = (USHORT)((g_baq_t + 1) % BAQ_N);
+         continue;
+      }
+      fmemset((UCHAR FAR *)g_bapl, 0, sizeof(g_bapl));
+      g_bapl[1] = AP_WCID;                          /* sta_req_hdr: bss 0, wlan_idx_lo, 1 tlv, append      */
+      g_bapl[2] = 1;
+      g_bapl[4] = 1;
+      if (g_baq[k].step == 0) {                     /* STA_REC_WTBL { wtbl_req_hdr WTBL_SET, WTBL_BA }     */
+         put16((UCHAR FAR *)g_bapl + 8, 13);
+         put16((UCHAR FAR *)g_bapl + 10, 40);
+         g_bapl[12] = AP_WCID;
+         g_bapl[13] = 2;                            /* WTBL_SET                                            */
+         g_bapl[14] = 1;
+         put16((UCHAR FAR *)g_bapl + 20, 8);        /* WTBL_BA, 28 bytes                                   */
+         put16((UCHAR FAR *)g_bapl + 22, 28);
+         g_bapl[24] = tid;
+         g_bapl[25] = 2;                            /* MT_BA_TYPE_RECIPIENT                                */
+         put16((UCHAR FAR *)g_bapl + 32, en ? g_baq[k].win : 0);    /* ba_winsize                          */
+         fmemcpy((UCHAR FAR *)g_bapl + 34, (UCHAR FAR *)g_mnet->bssid, 6);   /* peer_addr                 */
+         g_bapl[40] = tid;                          /* rst_ba_tid                                          */
+         g_bapl[41] = 0;                            /* RST_BA_MAC_TID_MATCH                                */
+         g_bapl[42] = 1;                            /* rst_ba_sb                                           */
+         len = 48;
+      } else {                                      /* STA_REC_BA                                          */
+         put16((UCHAR FAR *)g_bapl + 8, 6);
+         put16((UCHAR FAR *)g_bapl + 10, 12);
+         g_bapl[12] = tid;
+         g_bapl[13] = 2;                            /* recipient                                           */
+         g_bapl[14] = 0;                            /* no A-MSDU                                           */
+         g_bapl[15] = (UCHAR)(en ? (1 << tid) : 0);
+         put16((UCHAR FAR *)g_bapl + 16, g_baq[k].ssn);
+         put16((UCHAR FAR *)g_bapl + 18, en ? g_baq[k].win : 0);
+         len = 20;
+      }
+      if (mt_mcu_async_uni(MCU_UNI_CMD_STA_REC_UPDATE, (UCHAR FAR *)g_bapl, len)) {
+         g_ba_busy++;                               /* the command ring is in use: next service run        */
+         return;
+      }
+      g_ba_cmds++;
+      if (g_baq[k].step == 0)
+         g_baq[k].step = 1;
+      else
+         g_baq_t = (USHORT)((g_baq_t + 1) % BAQ_N);
+   }
+}
+
+int hw_ba_start(UCHAR tid, USHORT ssn, USHORT win)
+{
+   if (!g_hw_ready || !g_mnet || !g_rxba)
+      return -1;
+   return ba_queue(tid, 1, ssn, win);
+}
+
+int hw_ba_stop(UCHAR tid)
+{
+   if (!g_hw_ready || !g_mnet)
+      return 0;
+   (void)ba_queue(tid, 0, 0, 0);
+   return 0;
+}
 int    hw_txagg_ok(void)                              { return 0; }
 USHORT hw_qos_sn(void)                                { return 0; }
 void   hw_txagg_offer(UCHAR tid, USHORT win)          { (void)tid; (void)win; }

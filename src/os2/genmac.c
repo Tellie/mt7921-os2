@@ -487,6 +487,11 @@ void dd_genmac_ioctl(RP_GENIOCTL FAR *rp)
    fast = (g_scanning && g_hw_ready && rp->Function == GENMAC_OID_GET && oid != OID_802_11_BSSID_LIST);
    if (!fast) {
       nic_lock();
+      if (g_hw_ready && hw_dead()) {               /* the firmware stopped answering: reset and reload it  */
+         tstr("[mt: firmware not answering]"); tnl();
+         hw_down();
+         g_hw_failed = 0;
+      }
       if (!g_hw_ready && !g_hw_failed && g_fwblob.done)
          hw_up();                                 /* the chip starts on the first GenMAC request             */
       if (g_hw_ready) {

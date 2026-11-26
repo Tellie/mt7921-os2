@@ -280,7 +280,7 @@ static ba_t   g_ba[BA_N];
 static DMA    g_ba_buf[BA_N];
 static UCHAR  g_ba_buf_ok[BA_N];
 UCHAR  g_ampdu = 1;
-UCHAR  g_fwht;                                         /* PROTOCOL.INI FWHT = 1: tell the firmware about HT     */
+UCHAR  g_fwht = 1;                                       /* PROTOCOL.INI FWHT = 1: tell the firmware about HT     */
 USHORT g_jhtcap;                                       /* the AP's HT capability info (association response)  */
 USHORT g_ba_started, g_ba_refused, g_ba_stopped, g_ba_rel, g_ba_old, g_ba_dup, g_ba_to, g_ba_max, g_ba_direct;
 

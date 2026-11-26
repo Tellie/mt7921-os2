@@ -149,6 +149,12 @@ static void run_cmd(void)
          sta_set_want((UCHAR FAR *)q, n, 1);
          tstr("[join rc "); th16((USHORT)(sta_join(0, 1) & 0xFFFF)); tstr(" fail "); th16(g_jfail); tcom(']'); tnl();
       }
+   } else if (c[0] == 'r' && c[1] == 'x') {                  /* "rxba 0|1": receive block-ack sessions      */
+      char *q = c + 2;
+
+      while (*q && (*q < '0' || *q > '9')) q++;
+      if (*q)
+         g_rxba = (UCHAR)(*q == '1');
    } else if ((c[0] == 'a' && c[1] == 'g') || (c[0] == 'f' && c[1] == 'w')) {   /* "aggtx 0|1", "fwht 0|1"   */
       char *q = c + 2;                                         /* (from the next join on)                     */
 
