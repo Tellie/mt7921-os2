@@ -24,7 +24,8 @@ USHORT g_rxs_n;
 UCHAR  g_rxba = 1;                                   /* receive block-ack sessions ('echo rxba 0|1')        */
 UCHAR  g_act[4][6];                                  /* the last 4 action frames from our AP: first 6 body bytes */
 USHORT g_act_n;
-USHORT g_rxm[2][5], g_rxbw[4], g_rx2ss;                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
+USHORT g_rxm[2][5], g_rxbw[4], g_rx2ss, g_txm[5], g_txbw[4], g_tx2ss;
+ULONG  g_tp_cur, g_tp_max, g_tp_t;                   /* unicast data bytes from our AP: this second, best second */                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
 USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last, g_echo;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
 static ULONG g_tim_t;
 static UCHAR  g_roc_token;
@@ -191,8 +192,17 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
 
          g_rxm[m][md > 4 ? 4 : md]++;
          if (!m) {                                  /* unicast: channel width and spatial streams          */
-            ULONG v0 = get32(b + g3);
+            ULONG v0 = get32(b + g3), now = dd_ms();
             UCHAR fm = (UCHAR)((v0 >> 12) & 7), rt = (UCHAR)(v0 & 0x7F);
+
+
+            if ((long)(now - g_tp_t) >= 1000L) {    /* bytes per second, the best second                   */
+               if (g_tp_cur > g_tp_max)
+                  g_tp_max = g_tp_cur;
+               g_tp_cur = 0;
+               g_tp_t = now;
+            }
+            g_tp_cur += len;
 
             g_rxbw[fm > 3 ? 3 : fm]++;
             if (((md == 2 || md == 3) && rt >= 8) || (md == 4 && ((v0 >> 7) & 7) >= 1))
@@ -248,6 +258,13 @@ void mt_txs(UCHAR FAR *b, USHORT len)
          g_eapol_pid = 0;
       }
       if ((g_pidfc[pid] & 0x0C) == 0x08) {
+         ULONG w0 = get32(b + p);
+         UCHAR md = (UCHAR)((w0 >> 6) & 0x0F), bw = (UCHAR)((w0 >> 29) & 7);
+
+         g_txm[md > 4 ? 4 : md]++;                  /* MT_TXS0_TX_RATE mode: CCK OFDM HT-MF HT-GF VHT+   */
+         g_txbw[bw > 3 ? 3 : bw]++;
+         if (((w0 >> 10) & 7) >= 1)
+            g_tx2ss++;
          if (g_txs_err[k]) g_txs_dbad++; else g_txs_dok++;
       } else {
          if (g_txs_err[k]) g_txs_mbad++; else g_txs_mok++;
@@ -659,7 +676,10 @@ int hw_join_prepare(net_t *n)
    g_tim_bcn = g_tim_set = g_tim_null = g_echo = g_act_n = g_ev_n = 0;
    fmemset((UCHAR FAR *)g_rxm, 0, sizeof(g_rxm));
    fmemset((UCHAR FAR *)g_rxbw, 0, sizeof(g_rxbw));
-   g_rx2ss = 0;
+   fmemset((UCHAR FAR *)g_txm, 0, sizeof(g_txm));
+   fmemset((UCHAR FAR *)g_txbw, 0, sizeof(g_txbw));
+   g_rx2ss = g_tx2ss = 0;
+   g_tp_cur = g_tp_max = 0;
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
       dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);

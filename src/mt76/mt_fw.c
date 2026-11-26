@@ -563,6 +563,12 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps(" FWHT="); ph(g_fwht, 1); nl();
       ps("RXWIDTH (unicast from our AP) 20MHz="); ph(g_rxbw[0], 4); ps(" 40MHz="); ph(g_rxbw[1], 4);
       ps(" 80MHz="); ph(g_rxbw[2], 4); ps(" 160MHz="); ph(g_rxbw[3], 4); ps(" two-streams="); ph(g_rx2ss, 4); nl();
+      ps("TXMODE (our data; CCK OFDM HT-MF HT-GF VHT+) ");
+      for (i = 0; i < 5; i++) { ph(g_txm[i], 4); ps(" "); }
+      ps(" width 20/40/80/160="); for (i = 0; i < 4; i++) { ph(g_txbw[i], 4); ps(i < 3 ? "/" : ""); }
+      ps(" two-streams="); ph(g_tx2ss, 4); nl();
+      ps("RXRING (data ring, 128 buffers) most-in-one-pass="); ph(g_rx_batch, 4); ps(" found-full="); ph(g_rx_full, 4);
+      ps(" best-second="); ph(g_tp_max / 1024UL, 5); ps(" KB/s (hex)"); nl();
       ps("ACTION (from our AP, last 4: category action ...) n="); ph(g_act_n, 4);
       for (i = 0; i < 4 && i < g_act_n; i++) {
          USHORT j;

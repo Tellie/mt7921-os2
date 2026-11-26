@@ -46,7 +46,7 @@
 
 /* ---- DMA rings ---------------------------------------------------------------------------------------- */
 #define RX_BUF          2048                    /* bytes per receive buffer                              */
-#define RX_MAXBUF       32
+#define RX_MAXBUF       128
 #define TX0_N           32                      /* data/management ring: slots of TXD + TXP + frame      */
 #define TX_SLOT         2048
 
@@ -142,7 +142,8 @@ extern USHORT g_reattached;
 int    mt_dev_bss_init(void);                   /* DEV_INFO + BSS_INFO (disconnected)                    */
 void   mt_rx_frame(UCHAR FAR *b, USHORT len);   /* one RX buffer with a frame (RXD + 802.11)             */
 extern USHORT g_roc_held;
-extern USHORT g_rxs[2][6], g_rxs_n, g_rxm[2][5], g_act_n, g_rxbw[4], g_rx2ss;
+extern USHORT g_rxs[2][6], g_rxs_n, g_rxm[2][5], g_act_n, g_rxbw[4], g_rx2ss, g_txm[5], g_txbw[4], g_tx2ss, g_rx_batch, g_rx_full;
+extern ULONG  g_tp_max;
 extern UCHAR  g_act[4][6];
 extern UCHAR  g_ev_c[16];
 extern USHORT g_ev_v[16], g_ev_n, g_key_wait;

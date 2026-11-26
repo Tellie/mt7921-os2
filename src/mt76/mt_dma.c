@@ -13,7 +13,7 @@ RING g_rtx0  = { REG_TX_RING_BASE + 0x000, TX0_N };
 RING g_rfwdl = { REG_TX_RING_BASE + 0x100, 16 };
 RING g_rwm   = { REG_TX_RING_BASE + 0x110, 16 };
 RING g_rrx0  = { REG_RX_RING_BASE + 0x000, 8 };
-RING g_rrx2  = { REG_RX_RING_BASE + 0x020, 32 };
+RING g_rrx2  = { REG_RX_RING_BASE + 0x020, 128 };  /* data: an 80 MHz A-MPDU burst must fit */
 RING g_rrx4  = { REG_RX_RING_BASE + 0x040, 32 };
 DMA  g_cmdbuf, g_cmdbuf2, g_bounce, g_txslot[TX0_N];
 USHORT g_mcu_fail;                                  /* MCU commands without an answer in a row (firmware dead) */
@@ -351,6 +351,8 @@ static void rx_buffer(UCHAR FAR *b, USHORT len)
    }
 }
 
+USHORT g_rx_batch, g_rx_full;                       /* data ring: most buffers done in one pass; passes that found it full */
+
 static void rx_ring(RING *r)
 {
    UCHAR FAR *d;
@@ -367,6 +369,12 @@ static void rx_ring(RING *r)
       r->head = r->tail;
       r->tail = (USHORT)((r->tail + 1) % r->n);
       mmio_wr(r->regs + 0x8, r->head);
+   }
+   if (r == &g_rrx2) {
+      if (guard > g_rx_batch)
+         g_rx_batch = guard;
+      if (guard >= r->n)
+         g_rx_full++;
    }
 }
 
