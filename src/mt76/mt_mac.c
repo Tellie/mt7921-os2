@@ -24,7 +24,7 @@ USHORT g_rxs_n;
 UCHAR  g_rxba = 1;                                   /* receive block-ack sessions ('echo rxba 0|1')        */
 UCHAR  g_act[4][6];                                  /* the last 4 action frames from our AP: first 6 body bytes */
 USHORT g_act_n;
-USHORT g_rxm[2][5];                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
+USHORT g_rxm[2][5], g_rxbw[4], g_rx2ss;                                  /* data from our AP by rx mode: CCK OFDM HT-MF HT-GF VHT+ */
 USHORT g_tim_bcn, g_tim_set, g_tim_null, g_tim_last, g_echo;   /* our AP's beacons: all, TIM bit of our AID set; null frames sent */
 static ULONG g_tim_t;
 static UCHAR  g_roc_token;
@@ -190,6 +190,14 @@ void mt_rx_frame(UCHAR FAR *b, USHORT len)
          UCHAR md = (UCHAR)(b[g3 + 3] & 0x0F);        /* P-RXV0 TX_MODE, bits 27:24                          */
 
          g_rxm[m][md > 4 ? 4 : md]++;
+         if (!m) {                                  /* unicast: channel width and spatial streams          */
+            ULONG v0 = get32(b + g3);
+            UCHAR fm = (UCHAR)((v0 >> 12) & 7), rt = (UCHAR)(v0 & 0x7F);
+
+            g_rxbw[fm > 3 ? 3 : fm]++;
+            if (((md == 2 || md == 3) && rt >= 8) || (md == 4 && ((v0 >> 7) & 7) >= 1))
+               g_rx2ss++;
+         }
       }
 
       if (m && same6(b + h + 16, (UCHAR FAR *)g_hw_mac))
@@ -371,8 +379,28 @@ int hw_scan(void)
 }
 
 /* no 40/80 MHz yet: 20 MHz only */
-int hw_chan_ht40(UCHAR ch)  { (void)ch; return 0; }
-int hw_chan_vht80(UCHAR ch) { (void)ch; return 0; }
+/* Wider channels (Netherlands / CE, the channel list of SET_CHAN_DOMAIN): 40 MHz on 2.4 GHz 1..13 and on the 5 GHz
+ * pairs 36..64, 100..140; 80 MHz on the 5 GHz blocks 36-48, 52-64, 100-112, 116-128. */
+int hw_chan_ht40(UCHAR ch)
+{
+   return (ch >= 1 && ch <= 13) || (ch >= 36 && ch <= 64) || (ch >= 100 && ch <= 140);
+}
+
+int hw_chan_vht80(UCHAR ch)
+{
+   return (ch >= 36 && ch <= 64) || (ch >= 100 && ch <= 128);
+}
+
+/* the operating width for the firmware: 0 = 20, 1 = 40, 2 = 80 MHz; centre channel */
+static UCHAR op_bw(void)  { return (UCHAR)(g_j80 ? 2 : (g_j40 ? 1 : 0)); }
+static UCHAR op_centre(void)
+{
+   if (g_j80)
+      return g_jcf0;
+   if (g_j40)
+      return (UCHAR)(g_jsco == 1 ? g_mnet->ch + 2 : g_mnet->ch - 2);
+   return g_mnet->ch;
+}
 
 /* ---- join objects -------------------------------------------------------------------------------------------------- */
 static UCHAR has_wmm(void) { return (UCHAR)(g_mnet && g_mnet->wmm); }
@@ -381,6 +409,7 @@ static UCHAR has_wmm(void) { return (UCHAR)(g_mnet && g_mnet->wmm); }
 static USHORT sta_rec(UCHAR state, USHORT aid)
 {
    USHORT p, tlvs = 5, ht = (USHORT)(g_fwht && state && g_jht), cap = 0;
+   USHORT vht = (USHORT)(ht && g_j80), wtlvs = 3, wlen = 52;
    UCHAR g5 = (UCHAR)(g_mnet->ch > 14);
 
    if (ht) {                                        /* mac80211's sta ht_cap: the AP's, limited to ours    */
@@ -388,8 +417,15 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
       if (g_j40)
          cap |= (USHORT)(g_jhtcap & 0x0042);        /* 40 MHz, short GI 40                                 */
       tlvs++;
+      wtlvs++;
+      wlen += 12;
    }
-   pl_zero(160);
+   if (vht) {
+      tlvs++;
+      wtlvs++;
+      wlen += 8;
+   }
+   pl_zero(200);
    g_pl[1] = AP_WCID;                               /* sta_req_hdr: bss 0, wlan_idx_lo                     */
    g_pl[4] = 1;                                     /* is_tlv_append                                       */
    p = 8;                                           /* STA_REC_BASIC                                       */
@@ -406,9 +442,19 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
       pl16(p + 4, cap);
       p += 8;
    }
+   if (vht) {                                       /* STA_REC_VHT: cap, rx / tx MCS map (the AP's, our streams) */
+      USHORT map = (USHORT)(g_jvrx[0] | (g_jvrx[1] << 8));
+
+      map = (USHORT)(g_jnss >= 2 ? (map | 0xFFF0) : (map | 0xFFFC));
+      pl16(p, 0x0A); pl16(p + 2, 16);
+      pl32(p + 4, (g_jvsgi80 ? 0x00000020UL : 0) | ((ULONG)(g_jvexp & 7) << 23));
+      pl16(p + 8, map);
+      pl16(p + 10, map);
+      p += 16;
+   }
    pl16(p, 0x15); pl16(p + 2, 12);                  /* STA_REC_PHY                                         */
    pl16(p + 4, g5 ? 0x0015 : 0x000F);               /* basic rates                                         */
-   g_pl[p + 6] = (UCHAR)((g5 ? 0x08 : 0x03) | (ht ? 0x10 : 0));   /* OFDM / HR_DSSS + ERP, | HT          */
+   g_pl[p + 6] = (UCHAR)((g5 ? 0x08 : 0x03) | (ht ? 0x10 : 0) | (vht ? 0x20 : 0));   /* OFDM / DSSS+ERP | HT | VHT */
    if (ht)
       g_pl[p + 7] = (UCHAR)(g_ampdu_par & 0x1F);    /* A-MPDU factor, density                              */
    p += 12;                                         /* STA_REC_RA: legacy rates, HT MCS                    */
@@ -423,10 +469,10 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
    pl16(p, 7); pl16(p + 2, 12);
    g_pl[p + 8] = state;                             /* 0 NONE, 2 ASSOC                                     */
    p += 12;                                         /* STA_REC_WTBL                                        */
-   pl16(p, 13); pl16(p + 2, (USHORT)(ht ? 64 : 52));
+   pl16(p, 13); pl16(p + 2, wlen);
    g_pl[p + 4] = AP_WCID;
    g_pl[p + 5] = 1;                                 /* WTBL_RESET_AND_SET                                  */
-   pl16(p + 6, (USHORT)(ht ? 4 : 3));
+   pl16(p + 6, wtlvs);
    p += 12;                                         /* WTBL_GENERIC                                        */
    pl16(p, 0); pl16(p + 2, 20);
    fmemcpy((UCHAR FAR *)g_pl + p + 4, (UCHAR FAR *)g_mnet->bssid, 6);
@@ -446,6 +492,11 @@ static USHORT sta_rec(UCHAR state, USHORT aid)
       g_pl[p + 6] = (UCHAR)(g_ampdu_par & 3);
       g_pl[p + 7] = (UCHAR)((g_ampdu_par >> 2) & 7);
       p += 12;
+   }
+   if (vht) {                                       /* WTBL_VHT: ldpc, dyn_bw, vht, txop_ps                */
+      pl16(p, 3); pl16(p + 2, 8);
+      g_pl[p + 6] = 1;
+      p += 8;
    }
    pl16(2, tlvs);                                   /* tlv_num                                             */
    return uni(MCU_UNI_CMD_STA_REC_UPDATE, p);
@@ -499,7 +550,7 @@ static USHORT bss_info(int connected)
    pl16(30, OWN_WCID);                              /* sta_idx                                             */
    pl16(32, g5 ? 0x08 : 0x03);                      /* nonht_basic_phy                                     */
    if (g_fwht) {                                    /* as mt76_connac_mcu_uni_add_bss: | GN / AN; ERP / OFDM index */
-      g_pl[29] = (UCHAR)(g5 ? 0x11 : 0x0E);
+      g_pl[29] = (UCHAR)(g5 ? (0x11 | (g_j80 ? 0x20 : 0)) : 0x0E);
       pl16(32, g5 ? 3 : 1);
    }
    pl16(36, 15); pl16(38, 8);                       /* UNI_BSS_INFO_QBSS                                   */
@@ -510,7 +561,14 @@ static USHORT bss_info(int connected)
    pl_zero(24);                                     /* UNI_BSS_INFO_RLM                                    */
    pl16(4, 2); pl16(6, 20);
    g_pl[8] = g_mnet->ch;                            /* control channel                                     */
-   g_pl[9] = g_mnet->ch;                            /* centre channel (20 MHz)                             */
+   g_pl[9] = op_centre();                           /* centre channel                                      */
+   g_pl[11] = op_bw();                              /* CMD_CBW_20 / 40 / 80 MHZ                            */
+   if (g_pl[8] < g_pl[9])
+      g_pl[16] = 1;                                 /* sco: SCA                                            */
+   else if (g_pl[8] > g_pl[9])
+      g_pl[16] = 3;                                 /* SCB                                                 */
+   if (g_j40)
+      g_pl[15] = 4;                                 /* ht_op_info: 40 MHz allowed                          */
    g_pl[12] = 2;                                    /* tx streams                                          */
    g_pl[13] = 3;                                    /* rx chain mask                                       */
    g_pl[14] = 1;                                    /* short_st                                            */
@@ -600,6 +658,8 @@ int hw_join_prepare(net_t *n)
    g_mnet = n;
    g_tim_bcn = g_tim_set = g_tim_null = g_echo = g_act_n = g_ev_n = 0;
    fmemset((UCHAR FAR *)g_rxm, 0, sizeof(g_rxm));
+   fmemset((UCHAR FAR *)g_rxbw, 0, sizeof(g_rxbw));
+   g_rx2ss = 0;
    set_timing(n->ch, (cap & 0x0400) != 0);
    if (sta_rec(0, 0)) {
       dd_err("MT7921: STA_REC (AP, NONE) failed", g_uni_val[3]);
@@ -622,6 +682,11 @@ int hw_join_complete(void)
 {
    if (!g_mnet)
       return -1;
+   g_jnss = 1;                                      /* two streams if both sides can                       */
+   if (g_hw_nss >= 2 && g_maxnss >= 2 && g_jht && g_jht_mcs[1])
+      g_jnss = 2;
+   if (g_j80 && ((g_jvrx[0] >> 2) & 3) == 3)
+      g_jnss = 1;
    if (bss_info(1)) { dd_err("MT7921: BSS_INFO (connected) failed", g_uni_val[3]); return -1; }
    if (sta_rec(2, g_jaid)) { dd_err("MT7921: STA_REC (AP, ASSOC) failed", g_uni_val[3]); return -1; }
    if (vif_sta_rec()) { dd_err("MT7921: STA_REC (own BSS) failed", g_uni_val[3]); return -1; }

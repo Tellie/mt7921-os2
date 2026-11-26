@@ -561,6 +561,8 @@ void hw_status(void (*ps)(const char *), void (*ph)(ULONG v, USHORT digits), voi
       ps(" group=");
       for (i = 0; i < 5; i++) { ph(g_rxm[1][i], 4); ps(" "); }
       ps(" FWHT="); ph(g_fwht, 1); nl();
+      ps("RXWIDTH (unicast from our AP) 20MHz="); ph(g_rxbw[0], 4); ps(" 40MHz="); ph(g_rxbw[1], 4);
+      ps(" 80MHz="); ph(g_rxbw[2], 4); ps(" 160MHz="); ph(g_rxbw[3], 4); ps(" two-streams="); ph(g_rx2ss, 4); nl();
       ps("ACTION (from our AP, last 4: category action ...) n="); ph(g_act_n, 4);
       for (i = 0; i < 4 && i < g_act_n; i++) {
          USHORT j;

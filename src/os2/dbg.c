@@ -149,6 +149,16 @@ static void run_cmd(void)
          sta_set_want((UCHAR FAR *)q, n, 1);
          tstr("[join rc "); th16((USHORT)(sta_join(0, 1) & 0xFFFF)); tstr(" fail "); th16(g_jfail); tcom(']'); tnl();
       }
+   } else if ((c[0] == 'w' && c[1] == 'i') || (c[0] == 's' && c[1] == 't')) {   /* "width 20|40|80", "streams 1|2" */
+      char *q = c + 2;                                         /* (from the next join on)                     */
+      USHORT v = 0;
+
+      while (*q && (*q < '0' || *q > '9')) q++;
+      while (*q >= '0' && *q <= '9') v = (USHORT)(v * 10 + (*q++ - '0'));
+      if (c[0] == 'w')
+         g_maxw = (UCHAR)(v >= 80 ? 2 : (v >= 40 ? 1 : 0));
+      else if (v)
+         g_maxnss = (UCHAR)(v >= 2 ? 2 : 1);
    } else if (c[0] == 'r' && c[1] == 'x') {                  /* "rxba 0|1": receive block-ack sessions      */
       char *q = c + 2;
 
@@ -321,7 +331,7 @@ static void build_status(void)
    ps("LINK="); ps(g_joined ? "JOINED " : "none "); ph(g_jch, 2); ps(" AID="); ph(g_jaid, 4);
    ps(" JFAIL="); ph(g_jfail, 2); ps(g_open_net ? " OPEN" : " RSN"); ps(g_ptk_on ? " PTK" : " nokey");
    ps(g_authorized ? " AUTHORIZED" : ""); ps(g_jht ? (g_j80 ? " VHT80" : (g_j40 ? " HT40" : " HT20")) : " legacy"); ps(" NSS="); ph(g_jnss, 1); ps(" SCO="); ph(g_jsco, 1); nl();
-   ps("WIDTH maxwidth="); ph(g_maxw, 1);
+   ps("WIDTH maxwidth="); ph(g_maxw, 1); ps(" maxnss="); ph(g_maxnss, 1);
    if (g_jnet) {
       ps(" ap: vhtcaps="); ph(g_jnet->vht, 1); ps(" vht80="); ph(g_jnet->vhtw, 1); ps(" centre="); ph(g_jnet->vcf0, 2);
       ps(" ht40="); ph(g_jnet->ht40, 1); ph(g_jnet->htw, 1); ps(" sco="); ph(g_jnet->sco, 1);
